@@ -77,13 +77,15 @@ func computeDiffOfNormalizedClusters(managedCluster containerservice.ManagedClus
 	// difference in desired and existing, which would result in sending
 	// unnecessary Azure API requests.
 	propertiesNormalized := &containerservice.ManagedClusterProperties{
-		KubernetesVersion: managedCluster.ManagedClusterProperties.KubernetesVersion,
-		NetworkProfile:    &containerservice.NetworkProfile{},
+		KubernetesVersion:    managedCluster.ManagedClusterProperties.KubernetesVersion,
+		NetworkProfile:       &containerservice.NetworkProfile{},
+		DisableLocalAccounts: managedCluster.ManagedClusterProperties.DisableLocalAccounts,
 	}
 
 	existingMCPropertiesNormalized := &containerservice.ManagedClusterProperties{
-		KubernetesVersion: existingMC.ManagedClusterProperties.KubernetesVersion,
-		NetworkProfile:    &containerservice.NetworkProfile{},
+		KubernetesVersion:    existingMC.ManagedClusterProperties.KubernetesVersion,
+		NetworkProfile:       &containerservice.NetworkProfile{},
+		DisableLocalAccounts: existingMC.ManagedClusterProperties.DisableLocalAccounts,
 	}
 
 	if managedCluster.AadProfile != nil {
@@ -218,16 +220,6 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			EnableRBAC:        to.BoolPtr(true),
 			DNSPrefix:         &managedClusterSpec.Name,
 			KubernetesVersion: &managedClusterSpec.Version,
-			LinuxProfile: &containerservice.LinuxProfile{
-				AdminUsername: &defaultUser,
-				SSH: &containerservice.SSHConfiguration{
-					PublicKeys: &[]containerservice.SSHPublicKey{
-						{
-							KeyData: &managedClusterSpec.SSHPublicKey,
-						},
-					},
-				},
-			},
 			ServicePrincipalProfile: &containerservice.ManagedClusterServicePrincipalProfile{
 				ClientID: &managedIdentity,
 			},
@@ -237,6 +229,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 				LoadBalancerSku: containerservice.LoadBalancerSku(managedClusterSpec.LoadBalancerSKU),
 				NetworkPolicy:   containerservice.NetworkPolicy(managedClusterSpec.NetworkPolicy),
 			},
+			DisableLocalAccounts: managedClusterSpec.DisableLocalAccounts,
 		},
 	}
 
@@ -266,6 +259,13 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	for i := range managedClusterSpec.AgentPools {
 		pool := managedClusterSpec.AgentPools[i]
 		profile := converters.AgentPoolToManagedClusterAgentPoolProfile(pool)
+
+		if pool.KubeletConfig != nil {
+			profile.KubeletConfig = (*containerservice.KubeletConfig)(pool.KubeletConfig)
+		}
+
+		profile.Tags = pool.AdditionalTags
+
 		*managedCluster.AgentPoolProfiles = append(*managedCluster.AgentPoolProfiles, profile)
 	}
 
@@ -284,6 +284,19 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		managedCluster.Sku = &containerservice.ManagedClusterSKU{
 			Name: containerservice.ManagedClusterSKUNameBasic,
 			Tier: tierName,
+		}
+	}
+
+	if managedClusterSpec.SSHPublicKey != nil {
+		managedCluster.LinuxProfile = &containerservice.LinuxProfile{
+			AdminUsername: &defaultUser,
+			SSH: &containerservice.SSHConfiguration{
+				PublicKeys: &[]containerservice.SSHPublicKey{
+					{
+						KeyData: managedClusterSpec.SSHPublicKey,
+					},
+				},
+			},
 		}
 	}
 

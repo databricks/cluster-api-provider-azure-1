@@ -207,13 +207,21 @@ func (s *ManagedControlPlaneScope) Close(ctx context.Context) error {
 	return s.PatchObject(ctx)
 }
 
+// GetVNetResourceGroup returns the vNet resource group name.
+func GetVNetResourceGroup(spec *infrav1exp.AzureManagedControlPlaneSpec) string {
+	if spec.VirtualNetwork.ResourceGroupName != nil {
+		return *spec.VirtualNetwork.ResourceGroupName
+	}
+	return spec.ResourceGroupName
+}
+
 // Vnet returns the cluster Vnet.
 func (s *ManagedControlPlaneScope) Vnet() *infrav1.VnetSpec {
 	return &infrav1.VnetSpec{
-		ResourceGroup: s.ControlPlane.Spec.ResourceGroupName,
+		ResourceGroup: GetVNetResourceGroup(&s.ControlPlane.Spec),
 		Name:          s.ControlPlane.Spec.VirtualNetwork.Name,
 		VnetClassSpec: infrav1.VnetClassSpec{
-			CIDRBlocks: []string{s.ControlPlane.Spec.VirtualNetwork.CIDRBlock},
+			CIDRBlocks: s.ControlPlane.Spec.VirtualNetwork.CIDRBlocks,
 		},
 	}
 }
@@ -231,7 +239,7 @@ func (s *ManagedControlPlaneScope) GroupSpec() azure.ResourceSpecGetter {
 // VNetSpec returns the virtual network spec.
 func (s *ManagedControlPlaneScope) VNetSpec() azure.ResourceSpecGetter {
 	return &virtualnetworks.VNetSpec{
-		ResourceGroup:  s.Vnet().ResourceGroup,
+		ResourceGroup:  GetVNetResourceGroup(&s.ControlPlane.Spec),
 		Name:           s.Vnet().Name,
 		CIDRs:          s.Vnet().CIDRBlocks,
 		Location:       s.Location(),
@@ -257,18 +265,21 @@ func (s *ManagedControlPlaneScope) NodeNatGateway() infrav1.NatGateway {
 
 // SubnetSpecs returns the subnets specs.
 func (s *ManagedControlPlaneScope) SubnetSpecs() []azure.ResourceSpecGetter {
-	return []azure.ResourceSpecGetter{
-		&subnets.SubnetSpec{
-			Name:              s.NodeSubnet().Name,
+	nodeSubnets := s.NodeSubnets()
+	subnetSpecs := make([]azure.ResourceSpecGetter, len(nodeSubnets))
+	for i := range nodeSubnets {
+		subnetSpecs[i] = &subnets.SubnetSpec{
+			Name:              nodeSubnets[i].Name,
 			ResourceGroup:     s.ResourceGroup(),
 			SubscriptionID:    s.SubscriptionID(),
-			CIDRs:             s.NodeSubnet().CIDRBlocks,
+			CIDRs:             nodeSubnets[i].CIDRBlocks,
 			VNetName:          s.Vnet().Name,
 			VNetResourceGroup: s.Vnet().ResourceGroup,
 			IsVNetManaged:     s.IsVnetManaged(),
 			Role:              infrav1.SubnetNode,
-		},
+		}
 	}
+	return subnetSpecs
 }
 
 // Subnets returns the subnets specs.
@@ -276,14 +287,18 @@ func (s *ManagedControlPlaneScope) Subnets() infrav1.Subnets {
 	return infrav1.Subnets{}
 }
 
-// NodeSubnet returns the cluster node subnet.
-func (s *ManagedControlPlaneScope) NodeSubnet() infrav1.SubnetSpec {
-	return infrav1.SubnetSpec{
-		Name: s.ControlPlane.Spec.VirtualNetwork.Subnet.Name,
-		SubnetClassSpec: infrav1.SubnetClassSpec{
-			CIDRBlocks: []string{s.ControlPlane.Spec.VirtualNetwork.Subnet.CIDRBlock},
-		},
+// NodeSubnets returns the cluster node subnets.
+func (s *ManagedControlPlaneScope) NodeSubnets() []infrav1.SubnetSpec {
+	subnetSpecs := make([]infrav1.SubnetSpec, len(s.ControlPlane.Spec.VirtualNetwork.Subnets))
+	for i := range s.ControlPlane.Spec.VirtualNetwork.Subnets {
+		subnetSpecs[i] = infrav1.SubnetSpec{
+			Name: s.ControlPlane.Spec.VirtualNetwork.Subnets[i].Name,
+			SubnetClassSpec: infrav1.SubnetClassSpec{
+				CIDRBlocks: s.ControlPlane.Spec.VirtualNetwork.Subnets[i].CIDRBlocks,
+			},
+		}
 	}
+	return subnetSpecs
 }
 
 // SetSubnet sets the passed subnet spec into the scope.
@@ -309,24 +324,14 @@ func (s *ManagedControlPlaneScope) ControlPlaneSubnet() infrav1.SubnetSpec {
 	return infrav1.SubnetSpec{}
 }
 
-// NodeSubnets returns the subnets with the node role.
-func (s *ManagedControlPlaneScope) NodeSubnets() []infrav1.SubnetSpec {
-	return []infrav1.SubnetSpec{
-		{
-			Name: s.ControlPlane.Spec.VirtualNetwork.Subnet.Name,
-			SubnetClassSpec: infrav1.SubnetClassSpec{
-				CIDRBlocks: []string{s.ControlPlane.Spec.VirtualNetwork.Subnet.CIDRBlock},
-			},
-		},
-	}
-}
-
 // Subnet returns the subnet with the provided name.
 func (s *ManagedControlPlaneScope) Subnet(name string) infrav1.SubnetSpec {
 	subnet := infrav1.SubnetSpec{}
-	if name == s.ControlPlane.Spec.VirtualNetwork.Subnet.Name {
-		subnet.Name = s.ControlPlane.Spec.VirtualNetwork.Subnet.Name
-		subnet.CIDRBlocks = []string{s.ControlPlane.Spec.VirtualNetwork.Subnet.CIDRBlock}
+	for _, subnetSpec := range s.ControlPlane.Spec.VirtualNetwork.Subnets {
+		if name == subnetSpec.Name {
+			subnet.Name = subnetSpec.Name
+			subnet.CIDRBlocks = subnetSpec.CIDRBlocks
+		}
 	}
 
 	return subnet
@@ -397,11 +402,19 @@ func (s *ManagedControlPlaneScope) ManagedClusterAnnotations() map[string]string
 
 // ManagedClusterSpec returns the managed cluster spec.
 func (s *ManagedControlPlaneScope) ManagedClusterSpec() (azure.ManagedClusterSpec, error) {
-	decodedSSHPublicKey, err := base64.StdEncoding.DecodeString(s.ControlPlane.Spec.SSHPublicKey)
-	if err != nil {
-		return azure.ManagedClusterSpec{}, errors.Wrap(err, "failed to decode SSHPublicKey")
+	var sshPublicKey *string
+	if s.ControlPlane.Spec.SSHPublicKey != nil {
+		decodedSSHPublicKey, err := base64.StdEncoding.DecodeString(*s.ControlPlane.Spec.SSHPublicKey)
+		if err != nil {
+			return azure.ManagedClusterSpec{}, errors.Wrap(err, "failed to decode SSHPublicKey")
+		}
+		sshPublicKey = to.StringPtr(string(decodedSSHPublicKey))
 	}
 
+	subnetName := ""
+	if len(s.ControlPlane.Spec.VirtualNetwork.Subnets) > 0 {
+		subnetName = s.ControlPlane.Spec.VirtualNetwork.Subnets[0].Name
+	}
 	managedClusterSpec := azure.ManagedClusterSpec{
 		Name:                  s.ControlPlane.Name,
 		ResourceGroupName:     s.ControlPlane.Spec.ResourceGroupName,
@@ -409,14 +422,15 @@ func (s *ManagedControlPlaneScope) ManagedClusterSpec() (azure.ManagedClusterSpe
 		Location:              s.ControlPlane.Spec.Location,
 		Tags:                  s.ControlPlane.Spec.AdditionalTags,
 		Version:               strings.TrimPrefix(s.ControlPlane.Spec.Version, "v"),
-		SSHPublicKey:          string(decodedSSHPublicKey),
+		SSHPublicKey:          sshPublicKey,
 		DNSServiceIP:          s.ControlPlane.Spec.DNSServiceIP,
 		VnetSubnetID: azure.SubnetID(
 			s.ControlPlane.Spec.SubscriptionID,
-			s.ControlPlane.Spec.ResourceGroupName,
+			GetVNetResourceGroup(&s.ControlPlane.Spec),
 			s.ControlPlane.Spec.VirtualNetwork.Name,
-			s.ControlPlane.Spec.VirtualNetwork.Subnet.Name,
+			subnetName,
 		),
+		DisableLocalAccounts: s.ControlPlane.Spec.DisableLocalAccounts,
 	}
 
 	if s.ControlPlane.Spec.NetworkPlugin != nil {
@@ -595,23 +609,20 @@ func buildAgentPoolSpec(managedControlPlane *infrav1exp.AzureManagedControlPlane
 	}
 
 	agentPoolSpec := azure.AgentPoolSpec{
-		Name:          to.String(managedMachinePool.Spec.Name),
-		ResourceGroup: managedControlPlane.Spec.ResourceGroupName,
-		Cluster:       managedControlPlane.Name,
-		SKU:           managedMachinePool.Spec.SKU,
-		Replicas:      replicas,
-		Version:       normalizedVersion,
-		VnetSubnetID: azure.SubnetID(
-			managedControlPlane.Spec.SubscriptionID,
-			managedControlPlane.Spec.ResourceGroupName,
-			managedControlPlane.Spec.VirtualNetwork.Name,
-			managedControlPlane.Spec.VirtualNetwork.Subnet.Name,
-		),
-		Mode:              managedMachinePool.Spec.Mode,
-		MaxPods:           managedMachinePool.Spec.MaxPods,
-		AvailabilityZones: managedMachinePool.Spec.AvailabilityZones,
-		OsDiskType:        managedMachinePool.Spec.OsDiskType,
-		EnableUltraSSD:    managedMachinePool.Spec.EnableUltraSSD,
+		Name:               to.String(managedMachinePool.Spec.Name),
+		ResourceGroup:      managedControlPlane.Spec.ResourceGroupName,
+		Cluster:            managedControlPlane.Name,
+		SKU:                managedMachinePool.Spec.SKU,
+		Replicas:           replicas,
+		Version:            normalizedVersion,
+		Mode:               managedMachinePool.Spec.Mode,
+		MaxPods:            managedMachinePool.Spec.MaxPods,
+		AvailabilityZones:  managedMachinePool.Spec.AvailabilityZones,
+		OsDiskType:         managedMachinePool.Spec.OsDiskType,
+		EnableUltraSSD:     managedMachinePool.Spec.EnableUltraSSD,
+		EnableFIPS:         managedMachinePool.Spec.EnableFIPS,
+		EnableNodePublicIP: managedMachinePool.Spec.EnableNodePublicIP,
+		ScaleSetPriority:   managedMachinePool.Spec.ScaleSetPriority,
 	}
 
 	if managedMachinePool.Spec.OSDiskSizeGB != nil {
@@ -636,6 +647,33 @@ func buildAgentPoolSpec(managedControlPlane *infrav1exp.AzureManagedControlPlane
 		agentPoolSpec.NodeLabels = make(map[string]*string, len(managedMachinePool.Spec.NodeLabels))
 		for k, v := range managedMachinePool.Spec.NodeLabels {
 			agentPoolSpec.NodeLabels[k] = to.StringPtr(v)
+		}
+	}
+
+	if managedMachinePool.Spec.VnetSubnetID != nil {
+		agentPoolSpec.VnetSubnetID = *managedMachinePool.Spec.VnetSubnetID
+	} else {
+		subnetName := ""
+		if len(managedControlPlane.Spec.VirtualNetwork.Subnets) > 0 {
+			subnetName = managedControlPlane.Spec.VirtualNetwork.Subnets[0].Name
+		}
+		agentPoolSpec.VnetSubnetID = azure.SubnetID(
+			managedControlPlane.Spec.SubscriptionID,
+			GetVNetResourceGroup(&managedControlPlane.Spec),
+			managedControlPlane.Spec.VirtualNetwork.Name,
+			subnetName,
+		)
+	}
+
+	if managedMachinePool.Spec.KubeletConfig != nil {
+		agentPoolSpec.KubeletConfig = (*infrav1.KubeletConfig)(managedMachinePool.Spec.KubeletConfig)
+	}
+
+	if managedMachinePool.Spec.AdditionalTags != nil {
+		agentPoolSpec.AdditionalTags = map[string]*string{}
+		for k, v := range managedMachinePool.Spec.AdditionalTags {
+			val := v
+			agentPoolSpec.AdditionalTags[k] = &val
 		}
 	}
 
