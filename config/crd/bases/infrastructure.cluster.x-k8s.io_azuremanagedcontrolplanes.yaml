@@ -101,6 +101,7 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
@@ -363,6 +364,7 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
@@ -725,6 +727,7 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
