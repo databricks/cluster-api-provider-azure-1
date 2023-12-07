@@ -121,6 +121,15 @@ type AzureManagedControlPlaneSpec struct {
 	// IPFamilies - IP families are used to determine single-stack or dual-stack clusters. For single-stack, the expected value is IPv4. For dual-stack, the expected values are IPv4 and IPv6.
 	// +optional
 	IPFamilies *[]string `json:"ipFamilies,omitempty"`
+
+	// AzureEnvironment is the name of the AzureCloud to be used.
+	// The default value that would be used by most users is "AzurePublicCloud", other values are:
+	// - ChinaCloud: "AzureChinaCloud"
+	// - PublicCloud: "AzurePublicCloud"
+	// - USGovernmentCloud: "AzureUSGovernmentCloud"
+	// +kubebuilder:default="AzurePublicCloud"
+	// +optional
+	AzureEnvironment string `json:"azureEnvironment,omitempty"`
 }
 
 // AADProfile - AAD integration managed by AKS.

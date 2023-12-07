@@ -769,6 +769,7 @@ func autoConvert_v1beta1_AzureManagedControlPlaneSpec_To_v1alpha3_AzureManagedCo
 	// WARNING: in.APIServerAccessProfile requires manual conversion: does not exist in peer-type
 	// WARNING: in.DisableLocalAccounts requires manual conversion: does not exist in peer-type
 	// WARNING: in.IPFamilies requires manual conversion: does not exist in peer-type
+	// WARNING: in.AzureEnvironment requires manual conversion: does not exist in peer-type
 	return nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"net"
 	"reflect"
 	"regexp"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,8 +29,8 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	infrav1 "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
+	webhook_utils "sigs.k8s.io/cluster-api-provider-azure/util/webhook"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 var kubeSemver = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-0-9a-zA-Z_\.+]*)?$`)
@@ -212,6 +213,13 @@ func (m *AzureManagedControlPlane) ValidateUpdate(oldRaw runtime.Object) error {
 					*m.Spec.LoadBalancerSKU,
 					"field is immutable"))
 		}
+	}
+
+	if err := webhook_utils.ValidateImmutable(
+		field.NewPath("Spec", "AzureEnvironment"),
+		old.Spec.AzureEnvironment,
+		m.Spec.AzureEnvironment); err != nil {
+		allErrs = append(allErrs, err)
 	}
 
 	if old.Spec.AADProfile != nil {

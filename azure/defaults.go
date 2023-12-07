@@ -29,6 +29,14 @@ import (
 const (
 	// DefaultUserName is the default username for a created VM.
 	DefaultUserName = "capi"
+	// DefaultAKSUserName is the default username for a created AKS VM.
+	DefaultAKSUserName = "azureuser"
+	// PublicCloudName is the name of the Azure public cloud.
+	PublicCloudName = "AzurePublicCloud"
+	// ChinaCloudName is the name of the Azure China cloud.
+	ChinaCloudName = "AzureChinaCloud"
+	// USGovernmentCloudName is the name of the Azure US Government cloud.
+	USGovernmentCloudName = "AzureUSGovernmentCloud"
 )
 
 const (
