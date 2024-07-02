@@ -18,8 +18,10 @@ package scope
 
 import (
 	"context"
+	"crypto/rsa"
 	"fmt"
 	"reflect"
+	"sigs.k8s.io/cluster-api-provider-azure/util/crypto"
 
 	aadpodid "github.com/Azure/aad-pod-identity/pkg/apis/aadpodidentity"
 	aadpodv1 "github.com/Azure/aad-pod-identity/pkg/apis/aadpodidentity/v1"
@@ -40,12 +42,14 @@ import (
 )
 
 const azureSecretKey = "clientSecret"
+const azureCertKey = "clientCert"
 
 // CredentialsProvider defines the behavior for azure identity based credential providers.
 type CredentialsProvider interface {
 	GetAuthorizer(ctx context.Context, resourceManagerEndpoint, activeDirectoryEndpoint string) (autorest.Authorizer, error)
 	GetClientID() string
 	GetClientSecret(ctx context.Context) (string, error)
+	GetClientCert(ctx context.Context) ([]byte, error)
 	GetTenantID() string
 }
 
@@ -138,22 +142,28 @@ func (p *ManagedControlPlaneCredentialsProvider) GetAuthorizer(ctx context.Conte
 func (p *AzureCredentialsProvider) GetAuthorizer(ctx context.Context, resourceManagerEndpoint, activeDirectoryEndpoint string, clusterMeta metav1.ObjectMeta) (autorest.Authorizer, error) {
 	var spt *adal.ServicePrincipalToken
 	switch p.Identity.Spec.Type {
-	case infrav1.ServicePrincipal, infrav1.ServicePrincipalCertificate:
-		if err := createAzureIdentityWithBindings(ctx, p.Identity, resourceManagerEndpoint, activeDirectoryEndpoint, clusterMeta, p.Client); err != nil {
+	case infrav1.ServicePrincipalCertificate:
+		oauthConfig, err := adal.NewOAuthConfig(activeDirectoryEndpoint, p.GetTenantID())
+		if err != nil {
 			return nil, err
 		}
 
-		msiEndpoint, err := adal.GetMSIVMEndpoint()
+		clientCertData, err := p.GetClientCert(ctx)
 		if err != nil {
-			return nil, errors.Errorf("failed to get MSI endpoint: %v", err)
+			return nil, errors.Wrap(err, "failed to get client cert")
 		}
 
-		spt, err = adal.NewServicePrincipalTokenFromMSIWithUserAssignedID(msiEndpoint, resourceManagerEndpoint, p.Identity.Spec.ClientID)
+		privateKey, clientCert, err := crypto.ParsePEM(clientCertData)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to parse client cert PEM")
+		}
+
+		spt, err = adal.NewServicePrincipalTokenFromCertificate(*oauthConfig, p.Identity.Spec.ClientID, clientCert, privateKey.(*rsa.PrivateKey), resourceManagerEndpoint)
 		if err != nil {
 			return nil, errors.Errorf("failed to get token from service principal identity: %v", err)
 		}
 
-	case infrav1.ManualServicePrincipal:
+	case infrav1.ServicePrincipal, infrav1.ManualServicePrincipal:
 		oauthConfig, err := adal.NewOAuthConfig(activeDirectoryEndpoint, p.GetTenantID())
 		if err != nil {
 			return nil, err
@@ -196,6 +206,21 @@ func (p *AzureCredentialsProvider) GetClientSecret(ctx context.Context) (string,
 		return "", errors.Wrap(err, "Unable to fetch ClientSecret")
 	}
 	return string(secret.Data[azureSecretKey]), nil
+}
+
+// GetClientCert returns the Client Certificate associated with the AzureCredentialsProvider's Identity.
+func (p *AzureCredentialsProvider) GetClientCert(ctx context.Context) ([]byte, error) {
+	secretRef := p.Identity.Spec.ClientSecret
+	key := types.NamespacedName{
+		Namespace: secretRef.Namespace,
+		Name:      secretRef.Name,
+	}
+	secret := &corev1.Secret{}
+
+	if err := p.Client.Get(ctx, key, secret); err != nil {
+		return nil, errors.Wrap(err, "Unable to fetch ClientCert")
+	}
+	return secret.Data[azureCertKey], nil
 }
 
 // GetTenantID returns the Tenant ID associated with the AzureCredentialsProvider's Identity.

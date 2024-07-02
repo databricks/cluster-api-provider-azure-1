@@ -19,10 +19,16 @@ package managedclusters
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/tools/clientcmd"
 	"net"
+	"sigs.k8s.io/cluster-api-provider-azure/azure/services/token"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"sigs.k8s.io/cluster-api-provider-azure/azure/scope"
+	"sigs.k8s.io/cluster-api-provider-azure/feature"
+	"sigs.k8s.io/cluster-api-provider-azure/util/kubelogin"
+
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
@@ -41,11 +47,16 @@ const serviceName = "managedclusters"
 var (
 	defaultUser     = "azureuser"
 	managedIdentity = "msi"
+
+	// The aadResourceID is the application-id used by the server side. The access token accessing AKS clusters need to be issued for this app.
+	// Refer: https://azure.github.io/kubelogin/concepts/aks.html?highlight=6dae42f8-4368-4678-94ff-3960e28e3630#azure-kubernetes-service-aad-server
+	aadResourceID = "6dae42f8-4368-4678-94ff-3960e28e3630"
 )
 
 // ManagedClusterScope defines the scope interface for a managed cluster.
 type ManagedClusterScope interface {
 	azure.ClusterDescriber
+	azure.AsyncStatusUpdater
 	ManagedClusterAnnotations() map[string]string
 	ManagedClusterSpec() (azure.ManagedClusterSpec, error)
 	GetAllAgentPoolSpecs(ctx context.Context) ([]azure.AgentPoolSpec, error)
@@ -53,6 +64,7 @@ type ManagedClusterScope interface {
 	MakeEmptyKubeConfigSecret() corev1.Secret
 	GetKubeConfigData() []byte
 	SetKubeConfigData([]byte)
+	GetManagedControlPlaneCredentialsProvider() *scope.ManagedControlPlaneCredentialsProvider
 }
 
 // Service provides operations on azure resources.
@@ -77,13 +89,15 @@ func computeDiffOfNormalizedClusters(managedCluster containerservice.ManagedClus
 	// difference in desired and existing, which would result in sending
 	// unnecessary Azure API requests.
 	propertiesNormalized := &containerservice.ManagedClusterProperties{
-		KubernetesVersion: managedCluster.ManagedClusterProperties.KubernetesVersion,
-		NetworkProfile:    &containerservice.NetworkProfile{},
+		KubernetesVersion:    managedCluster.ManagedClusterProperties.KubernetesVersion,
+		NetworkProfile:       &containerservice.NetworkProfile{},
+		DisableLocalAccounts: managedCluster.ManagedClusterProperties.DisableLocalAccounts,
 	}
 
 	existingMCPropertiesNormalized := &containerservice.ManagedClusterProperties{
-		KubernetesVersion: existingMC.ManagedClusterProperties.KubernetesVersion,
-		NetworkProfile:    &containerservice.NetworkProfile{},
+		KubernetesVersion:    existingMC.ManagedClusterProperties.KubernetesVersion,
+		NetworkProfile:       &containerservice.NetworkProfile{},
+		DisableLocalAccounts: existingMC.ManagedClusterProperties.DisableLocalAccounts,
 	}
 
 	if managedCluster.AadProfile != nil {
@@ -102,29 +116,34 @@ func computeDiffOfNormalizedClusters(managedCluster containerservice.ManagedClus
 		}
 	}
 
-	if managedCluster.AddonProfiles != nil {
-		for k, v := range managedCluster.AddonProfiles {
-			if propertiesNormalized.AddonProfiles == nil {
-				propertiesNormalized.AddonProfiles = map[string]*containerservice.ManagedClusterAddonProfile{}
-			}
-			propertiesNormalized.AddonProfiles[k] = &containerservice.ManagedClusterAddonProfile{
-				Enabled: v.Enabled,
-				Config:  v.Config,
-			}
-		}
-	}
-
-	if existingMC.AddonProfiles != nil {
-		for k, v := range existingMC.AddonProfiles {
-			if existingMCPropertiesNormalized.AddonProfiles == nil {
-				existingMCPropertiesNormalized.AddonProfiles = map[string]*containerservice.ManagedClusterAddonProfile{}
-			}
-			existingMCPropertiesNormalized.AddonProfiles[k] = &containerservice.ManagedClusterAddonProfile{
-				Enabled: v.Enabled,
-				Config:  v.Config,
-			}
-		}
-	}
+	// TODO: Enable this after we start specifying addon profiles through DKC controller.
+	//if managedCluster.AddonProfiles != nil {
+	//	for k, v := range managedCluster.AddonProfiles {
+	//		if propertiesNormalized.AddonProfiles == nil {
+	//			propertiesNormalized.AddonProfiles = map[string]*containerservice.ManagedClusterAddonProfile{}
+	//		}
+	//		propertiesNormalized.AddonProfiles[k] = &containerservice.ManagedClusterAddonProfile{
+	//			Enabled: v.Enabled,
+	//			Config:  v.Config,
+	//		}
+	//	}
+	//}
+	//
+	//if existingMC.AddonProfiles != nil {
+	//	for k, v := range existingMC.AddonProfiles {
+	//		// If existing addon profile is disabled and the desired addon profile is nil or doesn't specify, skip it.
+	//		if !*v.Enabled && (propertiesNormalized.AddonProfiles == nil || propertiesNormalized.AddonProfiles[k] == nil) {
+	//			continue
+	//		}
+	//		if existingMCPropertiesNormalized.AddonProfiles == nil {
+	//			existingMCPropertiesNormalized.AddonProfiles = map[string]*containerservice.ManagedClusterAddonProfile{}
+	//		}
+	//		existingMCPropertiesNormalized.AddonProfiles[k] = &containerservice.ManagedClusterAddonProfile{
+	//			Enabled: v.Enabled,
+	//			Config:  v.Config,
+	//		}
+	//	}
+	//}
 
 	if managedCluster.NetworkProfile != nil {
 		propertiesNormalized.NetworkProfile.LoadBalancerProfile = managedCluster.NetworkProfile.LoadBalancerProfile
@@ -160,7 +179,14 @@ func computeDiffOfNormalizedClusters(managedCluster containerservice.ManagedClus
 		existingMCClusterNormalized.Sku = existingMC.Sku
 	}
 
-	diff := cmp.Diff(clusterNormalized, existingMCClusterNormalized)
+	if len(managedCluster.Tags) > 0 {
+		clusterNormalized.Tags = managedCluster.Tags
+	}
+	if len(existingMC.Tags) > 0 {
+		existingMCClusterNormalized.Tags = existingMC.Tags
+	}
+
+	diff := cmp.Diff(existingMCClusterNormalized, clusterNormalized)
 	return diff
 }
 
@@ -191,6 +217,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	existingMC, err := s.Client.Get(ctx, managedClusterSpec.ResourceGroupName, managedClusterSpec.Name)
 	// Transient or other failure not due to 404
 	if err != nil && !azure.ResourceNotFound(err) {
+		s.Scope.UpdatePutStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, err)
 		return azure.WithTransientError(errors.Wrap(err, "failed to fetch existing managed cluster"), 20*time.Second)
 	}
 
@@ -218,16 +245,6 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			EnableRBAC:        to.BoolPtr(true),
 			DNSPrefix:         &managedClusterSpec.Name,
 			KubernetesVersion: &managedClusterSpec.Version,
-			LinuxProfile: &containerservice.LinuxProfile{
-				AdminUsername: &defaultUser,
-				SSH: &containerservice.SSHConfiguration{
-					PublicKeys: &[]containerservice.SSHPublicKey{
-						{
-							KeyData: &managedClusterSpec.SSHPublicKey,
-						},
-					},
-				},
-			},
 			ServicePrincipalProfile: &containerservice.ManagedClusterServicePrincipalProfile{
 				ClientID: &managedIdentity,
 			},
@@ -237,7 +254,16 @@ func (s *Service) Reconcile(ctx context.Context) error {
 				LoadBalancerSku: containerservice.LoadBalancerSku(managedClusterSpec.LoadBalancerSKU),
 				NetworkPolicy:   containerservice.NetworkPolicy(managedClusterSpec.NetworkPolicy),
 			},
+			DisableLocalAccounts: managedClusterSpec.DisableLocalAccounts,
 		},
+	}
+
+	if managedClusterSpec.IPFamilies != nil {
+		var ipFamilies []containerservice.IPFamily
+		for _, ipf := range *managedClusterSpec.IPFamilies {
+			ipFamilies = append(ipFamilies, containerservice.IPFamily(ipf))
+		}
+		managedCluster.NetworkProfile.IPFamilies = &ipFamilies
 	}
 
 	if managedClusterSpec.PodCIDR != "" {
@@ -266,6 +292,13 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	for i := range managedClusterSpec.AgentPools {
 		pool := managedClusterSpec.AgentPools[i]
 		profile := converters.AgentPoolToManagedClusterAgentPoolProfile(pool)
+
+		if pool.KubeletConfig != nil {
+			profile.KubeletConfig = (*containerservice.KubeletConfig)(pool.KubeletConfig)
+		}
+
+		profile.Tags = pool.AdditionalTags
+
 		*managedCluster.AgentPoolProfiles = append(*managedCluster.AgentPoolProfiles, profile)
 	}
 
@@ -284,6 +317,19 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		managedCluster.Sku = &containerservice.ManagedClusterSKU{
 			Name: containerservice.ManagedClusterSKUNameBasic,
 			Tier: tierName,
+		}
+	}
+
+	if managedClusterSpec.SSHPublicKey != nil {
+		managedCluster.LinuxProfile = &containerservice.LinuxProfile{
+			AdminUsername: &defaultUser,
+			SSH: &containerservice.SSHConfiguration{
+				PublicKeys: &[]containerservice.SSHPublicKey{
+					{
+						KeyData: managedClusterSpec.SSHPublicKey,
+					},
+				},
+			},
 		}
 	}
 
@@ -322,6 +368,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	result := existingMC
 	if isCreate {
 		result, err = s.Client.CreateOrUpdate(ctx, managedClusterSpec.ResourceGroupName, managedClusterSpec.Name, managedCluster, customHeaders)
+		s.Scope.UpdatePutStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, err)
 		if err != nil {
 			return fmt.Errorf("failed to create managed cluster, %w", err)
 		}
@@ -330,7 +377,9 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if ps != string(infrav1alpha4.Canceled) && ps != string(infrav1alpha4.Failed) && ps != string(infrav1alpha4.Succeeded) {
 			msg := fmt.Sprintf("Unable to update existing managed cluster in non terminal state. Managed cluster must be in one of the following provisioning states: canceled, failed, or succeeded. Actual state: %s", ps)
 			klog.V(2).Infof(msg)
-			return azure.WithTransientError(errors.New(msg), 20*time.Second)
+			retErr := azure.WithTransientError(errors.New(msg), 20*time.Second)
+			s.Scope.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, retErr)
+			return retErr
 		}
 
 		// Normalize the LoadBalancerProfile so the diff below doesn't get thrown off by AKS added properties.
@@ -343,17 +392,21 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			existingMC.NetworkProfile.LoadBalancerProfile.EffectiveOutboundIPs = nil
 		}
 
-		// Avoid changing agent pool profiles through AMCP and just use the existing agent pool profiles
-		// AgentPool changes are managed through AMMP
-		managedCluster.AgentPoolProfiles = existingMC.AgentPoolProfiles
-
 		diff := computeDiffOfNormalizedClusters(managedCluster, existingMC)
-		if diff != "" {
-			klog.V(2).Infof("Update required (+new -old):\n%s", diff)
+		if diff != "" || ps == string(infrav1alpha4.Failed) {
+			klog.V(2).Infof("Cluster %s, provisioningState %s: update required (+new -old):\n%s", s.Scope.ClusterName(), ps, diff)
 			result, err = s.Client.CreateOrUpdate(ctx, managedClusterSpec.ResourceGroupName, managedClusterSpec.Name, managedCluster, customHeaders)
+			if err == nil && result.ManagedClusterProperties.ProvisioningState != nil && *result.ManagedClusterProperties.ProvisioningState == string(infrav1alpha4.Failed) {
+				err = fmt.Errorf("managed cluster provisioning state is failed")
+			}
+			s.Scope.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, err)
 			if err != nil {
 				return fmt.Errorf("failed to update managed cluster, %w", err)
 			}
+		} else {
+			klog.V(2).Infof("Cluster %s: no update required", s.Scope.ClusterName())
+			// Update ManagedClusterRunning condition to true.
+			s.Scope.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, nil)
 		}
 	}
 
@@ -375,9 +428,69 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get credentials for managed cluster")
 	}
-	s.Scope.SetKubeConfigData(kubeConfigData)
+	klog.V(2).Infof("Successfully fetched kubeconfig data for managed cluster %s", s.Scope.ClusterName())
+
+	// Use certificate to obtain AAD token for use with other controllers.
+	azureIdentity := s.Scope.GetManagedControlPlaneCredentialsProvider().Identity
+	if azureIdentity != nil && azureIdentity.Spec.Type == infrav1alpha4.ServicePrincipalCertificate {
+		clientCertData, err := s.Scope.GetManagedControlPlaneCredentialsProvider().GetClientCert(ctx)
+		if err != nil {
+			return errors.Wrap(err, "failed to get client cert")
+		}
+		userKubeConfig, err := getUserKubeConfigWithTokenFromCertificate(kubeConfigData, clientCertData, ctx, s.Scope)
+		if err != nil {
+			return errors.Wrap(err, "failed to get kubeconfig with token")
+		}
+		klog.V(2).Infof("Successfully updated kubeconfig with token for managed cluster %s", s.Scope.ClusterName())
+		s.Scope.SetKubeConfigData(userKubeConfig)
+		return nil
+	}
+
+	// Covert kubelogin data to non-interactive format for use with other controllers.
+	if feature.Gates.Enabled(feature.Kubelogin) {
+		convertedKubeConfigData, err := kubelogin.ConvertKubeConfig(ctx, s.Scope.ClusterName(), kubeConfigData, s.Scope.GetManagedControlPlaneCredentialsProvider())
+		if err != nil {
+			return errors.Wrap(err, "failed to convert kubeconfig to non-interactive format")
+		}
+		klog.V(2).Infof("Successfully converted kubeconfig to non-interactive format for managed cluster %s", s.Scope.ClusterName())
+		s.Scope.SetKubeConfigData(convertedKubeConfigData)
+	} else {
+		s.Scope.SetKubeConfigData(kubeConfigData)
+	}
 
 	return nil
+}
+
+// getUserKubeConfigWithTokenFromCertificate returns the kubeconfig with user token, for capz to create the target cluster.
+func getUserKubeConfigWithTokenFromCertificate(userKubeConfigData, clientCert []byte, ctx context.Context, scope azure.Authorizer) ([]byte, error) {
+	tokenClient, err := token.NewClient(scope, clientCert)
+	if err != nil {
+		return nil, errors.Wrap(err, "error while getting aad token client")
+	}
+
+	aadToken, err := tokenClient.GetAzureActiveDirectoryToken(ctx, aadResourceID)
+	if err != nil {
+		return nil, errors.Wrap(err, "error while getting aad token for user kubeconfig")
+	}
+
+	return createUserKubeconfigWithToken(aadToken, userKubeConfigData)
+}
+
+// createUserKubeconfigWithToken gets the kubeconfig data for authenticating with target cluster.
+func createUserKubeconfigWithToken(token string, userKubeConfigData []byte) ([]byte, error) {
+	config, err := clientcmd.Load(userKubeConfigData)
+	if err != nil {
+		return nil, errors.Wrap(err, "error while trying to unmarshal new user kubeconfig with token")
+	}
+	for _, auth := range config.AuthInfos {
+		auth.Token = token
+		auth.Exec = nil
+	}
+	kubeconfig, err := clientcmd.Write(*config)
+	if err != nil {
+		return nil, errors.Wrap(err, "error while trying to marshal new user kubeconfig with token")
+	}
+	return kubeconfig, nil
 }
 
 func handleAddonProfiles(managedCluster containerservice.ManagedCluster, spec azure.ManagedClusterSpec) {
@@ -403,6 +516,7 @@ func (s *Service) Delete(ctx context.Context) error {
 
 	klog.V(2).Infof("Deleting managed cluster  %s ", s.Scope.ClusterName())
 	err := s.Client.Delete(ctx, s.Scope.ResourceGroup(), s.Scope.ClusterName())
+	s.Scope.UpdateDeleteStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, err)
 	if err != nil {
 		if azure.ResourceNotFound(err) {
 			// already deleted

@@ -24,7 +24,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	containerservice "github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	containerservice "github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	gomock "github.com/golang/mock/gomock"
 )
 

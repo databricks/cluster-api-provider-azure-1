@@ -101,12 +101,14 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
                 enum:
                 - azure
                 - calico
+                - ''''''
                 type: string
               nodeResourceGroupName:
                 description: NodeResourceGroupName is the name of the resource group
@@ -157,7 +159,6 @@ spec:
             - location
             - nodeResourceGroupName
             - resourceGroupName
-            - sshPublicKey
             - version
             type: object
           status:
@@ -266,6 +267,11 @@ spec:
                 - host
                 - port
                 type: object
+              disableLocalAccounts:
+                description: DisableLocalAccounts - If set to true, getting static
+                  credential will be disabled for this cluster. Expected to only be
+                  used for AAD clusters.
+                type: boolean
               dnsServiceIP:
                 description: DNSServiceIP is an IP address assigned to the Kubernetes
                   DNS service. It must be within the Kubernetes service address range
@@ -359,12 +365,14 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
                 enum:
                 - azure
                 - calico
+                - ''''''
                 type: string
               nodeResourceGroupName:
                 description: NodeResourceGroupName is the name of the resource group
@@ -405,7 +413,15 @@ spec:
                 properties:
                   cidrBlock:
                     type: string
+                  cidrBlocks:
+                    items:
+                      type: string
+                    type: array
                   name:
+                    type: string
+                  resourceGroupName:
+                    description: ResourceGroupName is the name of the Azure resource
+                      group of the vNet.
                     type: string
                   subnet:
                     description: ManagedControlPlaneSubnet describes a subnet for
@@ -413,20 +429,44 @@ spec:
                     properties:
                       cidrBlock:
                         type: string
+                      cidrBlocks:
+                        items:
+                          type: string
+                        type: array
                       name:
                         type: string
                     required:
                     - cidrBlock
+                    - cidrBlocks
                     - name
                     type: object
+                  subnets:
+                    items:
+                      description: ManagedControlPlaneSubnet describes a subnet for
+                        an AKS cluster.
+                      properties:
+                        cidrBlock:
+                          type: string
+                        cidrBlocks:
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          type: string
+                      required:
+                      - cidrBlock
+                      - cidrBlocks
+                      - name
+                      type: object
+                    type: array
                 required:
                 - cidrBlock
+                - cidrBlocks
                 - name
                 type: object
             required:
             - location
             - resourceGroupName
-            - sshPublicKey
             - version
             type: object
           status:
@@ -576,6 +616,13 @@ spec:
                     - None
                     type: string
                 type: object
+              azureEnvironment:
+                default: AzurePublicCloud
+                description: 'AzureEnvironment is the name of the AzureCloud to be
+                  used. The default value that would be used by most users is "AzurePublicCloud",
+                  other values are: - ChinaCloud: "AzureChinaCloud" - PublicCloud:
+                  "AzurePublicCloud" - USGovernmentCloud: "AzureUSGovernmentCloud"'
+                type: string
               controlPlaneEndpoint:
                 description: ControlPlaneEndpoint represents the endpoint used to
                   communicate with the control plane.
@@ -591,6 +638,11 @@ spec:
                 - host
                 - port
                 type: object
+              disableLocalAccounts:
+                description: DisableLocalAccounts - If set to true, getting static
+                  credential will be disabled for this cluster. Expected to only be
+                  used for AAD clusters.
+                type: boolean
               dnsServiceIP:
                 description: DNSServiceIP is an IP address assigned to the Kubernetes
                   DNS service. It must be within the Kubernetes service address range
@@ -633,6 +685,13 @@ spec:
                     description: 'UID of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids'
                     type: string
                 type: object
+              ipFamilies:
+                description: IPFamilies - IP families are used to determine single-stack
+                  or dual-stack clusters. For single-stack, the expected value is
+                  IPv4. For dual-stack, the expected values are IPv4 and IPv6.
+                items:
+                  type: string
+                type: array
               loadBalancerProfile:
                 description: LoadBalancerProfile is the profile of the cluster load
                   balancer.
@@ -684,12 +743,14 @@ spec:
                 enum:
                 - azure
                 - kubenet
+                - none
                 type: string
               networkPolicy:
                 description: NetworkPolicy used for building Kubernetes network.
                 enum:
                 - azure
                 - calico
+                - ''''''
                 type: string
               nodeResourceGroupName:
                 description: NodeResourceGroupName is the name of the resource group
@@ -730,7 +791,15 @@ spec:
                 properties:
                   cidrBlock:
                     type: string
+                  cidrBlocks:
+                    items:
+                      type: string
+                    type: array
                   name:
+                    type: string
+                  resourceGroupName:
+                    description: ResourceGroupName is the name of the Azure resource
+                      group of the vNet.
                     type: string
                   subnet:
                     description: ManagedControlPlaneSubnet describes a subnet for
@@ -738,20 +807,44 @@ spec:
                     properties:
                       cidrBlock:
                         type: string
+                      cidrBlocks:
+                        items:
+                          type: string
+                        type: array
                       name:
                         type: string
                     required:
                     - cidrBlock
+                    - cidrBlocks
                     - name
                     type: object
+                  subnets:
+                    items:
+                      description: ManagedControlPlaneSubnet describes a subnet for
+                        an AKS cluster.
+                      properties:
+                        cidrBlock:
+                          type: string
+                        cidrBlocks:
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          type: string
+                      required:
+                      - cidrBlock
+                      - cidrBlocks
+                      - name
+                      type: object
+                    type: array
                 required:
                 - cidrBlock
+                - cidrBlocks
                 - name
                 type: object
             required:
             - location
             - resourceGroupName
-            - sshPublicKey
             - version
             type: object
           status:

@@ -18,6 +18,9 @@ package azure
 
 import (
 	"fmt"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"net/http"
 
 	"github.com/Azure/go-autorest/autorest"
@@ -29,6 +32,14 @@ import (
 const (
 	// DefaultUserName is the default username for a created VM.
 	DefaultUserName = "capi"
+	// DefaultAKSUserName is the default username for a created AKS VM.
+	DefaultAKSUserName = "azureuser"
+	// PublicCloudName is the name of the Azure public cloud.
+	PublicCloudName = "AzurePublicCloud"
+	// ChinaCloudName is the name of the Azure China cloud.
+	ChinaCloudName = "AzureChinaCloud"
+	// USGovernmentCloudName is the name of the Azure US Government cloud.
+	USGovernmentCloudName = "AzureUSGovernmentCloud"
 )
 
 const (
@@ -350,4 +361,52 @@ func msCorrelationIDSendDecorator(snd autorest.Sender) autorest.Sender {
 		}
 		return snd.Do(r)
 	})
+}
+
+// ARMClientOptions returns default ARM client options for CAPZ SDK v2 requests.
+func ARMClientOptions(azureEnvironment string, extraPolicies ...policy.Policy) (*arm.ClientOptions, error) {
+	opts := &arm.ClientOptions{}
+
+	switch azureEnvironment {
+	case PublicCloudName:
+		opts.Cloud = cloud.AzurePublic
+	case ChinaCloudName:
+		opts.Cloud = cloud.AzureChina
+	case USGovernmentCloudName:
+		opts.Cloud = cloud.AzureGovernment
+	case "":
+		// No cloud name provided, so leave at defaults.
+	default:
+		return nil, fmt.Errorf("invalid cloud name %q", azureEnvironment)
+	}
+	opts.PerCallPolicies = []policy.Policy{
+		correlationIDPolicy{},
+		userAgentPolicy{},
+	}
+	opts.PerCallPolicies = append(opts.PerCallPolicies, extraPolicies...)
+	opts.Retry.MaxRetries = -1 // Less than zero means one try and no retries.
+
+	return opts, nil
+}
+
+// correlationIDPolicy adds the "x-ms-correlation-request-id" header to requests.
+// It implements the policy.Policy interface.
+type correlationIDPolicy struct{}
+
+// Do adds the "x-ms-correlation-request-id" header if a request has a correlation ID in its context.
+func (p correlationIDPolicy) Do(req *policy.Request) (*http.Response, error) {
+	if corrID, ok := tele.CorrIDFromCtx(req.Raw().Context()); ok {
+		req.Raw().Header.Set(string(tele.CorrIDKeyVal), string(corrID))
+	}
+	return req.Next()
+}
+
+// userAgentPolicy extends the "User-Agent" header on requests.
+// It implements the policy.Policy interface.
+type userAgentPolicy struct{}
+
+// Do extends the "User-Agent" header of a request by appending CAPZ's user agent.
+func (p userAgentPolicy) Do(req *policy.Request) (*http.Response, error) {
+	req.Raw().Header.Set("User-Agent", req.Raw().UserAgent()+" "+UserAgent())
+	return req.Next()
 }

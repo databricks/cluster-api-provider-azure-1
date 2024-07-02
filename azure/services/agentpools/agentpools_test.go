@@ -21,7 +21,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"sigs.k8s.io/cluster-api-provider-azure/azure/services/subnets"
+
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/golang/mock/gomock"
@@ -34,18 +36,23 @@ import (
 	gomockinternal "sigs.k8s.io/cluster-api-provider-azure/internal/test/matchers/gomock"
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	"sigs.k8s.io/cluster-api/util/conditions"
 )
 
 func TestReconcile(t *testing.T) {
 	provisioningstatetestcases := []struct {
-		name                     string
-		agentpoolSpec            azure.AgentPoolSpec
-		provisioningStatesToTest []string
-		expectedError            string
-		expect                   func(m *mock_agentpools.MockClientMockRecorder, provisioningstate string)
+		name                          string
+		managedControlPlaneSubnetSpec subnets.SubnetSpec
+		agentpoolSpec                 azure.AgentPoolSpec
+		provisioningStatesToTest      []string
+		expectedError                 string
+		expect                        func(m *mock_agentpools.MockClientMockRecorder, provisioningstate string)
 	}{
 		{
 			name: "agentpool in terminal provisioning state",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentpoolSpec: azure.AgentPoolSpec{
 				ResourceGroup: "my-rg",
 				Cluster:       "my-cluster",
@@ -63,6 +70,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "agentpool in nonterminal provisioning state",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentpoolSpec: azure.AgentPoolSpec{
 				ResourceGroup: "my-rg",
 				Cluster:       "my-cluster",
@@ -91,6 +101,14 @@ func TestReconcile(t *testing.T) {
 				defer mockCtrl.Finish()
 
 				agentpoolsMock := mock_agentpools.NewMockClient(mockCtrl)
+				infraMachinePool := &infraexpv1.AzureManagedMachinePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: tc.agentpoolSpec.Name,
+					},
+					Spec: infraexpv1.AzureManagedMachinePoolSpec{
+						Name: &tc.agentpoolSpec.Name,
+					},
+				}
 				machinePoolScope := &scope.ManagedControlPlaneScope{
 					ControlPlane: &infraexpv1.AzureManagedControlPlane{
 						ObjectMeta: metav1.ObjectMeta{
@@ -98,17 +116,18 @@ func TestReconcile(t *testing.T) {
 						},
 						Spec: infraexpv1.AzureManagedControlPlaneSpec{
 							ResourceGroupName: tc.agentpoolSpec.ResourceGroup,
+							VirtualNetwork: infraexpv1.ManagedControlPlaneVirtualNetwork{
+								Subnets: []infraexpv1.ManagedControlPlaneSubnet{
+									{
+										Name: tc.managedControlPlaneSubnetSpec.Name,
+									},
+								},
+							},
 						},
 					},
-					MachinePool: &capiexp.MachinePool{},
-					InfraMachinePool: &infraexpv1.AzureManagedMachinePool{
-						ObjectMeta: metav1.ObjectMeta{
-							Name: tc.agentpoolSpec.Name,
-						},
-						Spec: infraexpv1.AzureManagedMachinePoolSpec{
-							Name: &tc.agentpoolSpec.Name,
-						},
-					},
+					MachinePool:      &capiexp.MachinePool{},
+					InfraMachinePool: infraMachinePool,
+					PatchTarget:      infraMachinePool,
 				}
 
 				tc.expect(agentpoolsMock.EXPECT(), provisioningstate)
@@ -120,9 +139,11 @@ func TestReconcile(t *testing.T) {
 
 				err := s.Reconcile(context.TODO())
 				if tc.expectedError != "" {
+					g.Expect(conditions.IsFalse(machinePoolScope.InfraMachinePool, capi.ReadyCondition)).To(BeTrue())
 					g.Expect(err.Error()).To(ContainSubstring(tc.expectedError))
 					g.Expect(err.Error()).To(ContainSubstring(provisioningstate))
 				} else {
+					g.Expect(conditions.IsTrue(machinePoolScope.InfraMachinePool, capi.ReadyCondition)).To(BeTrue())
 					g.Expect(err).NotTo(HaveOccurred())
 				}
 			})
@@ -130,13 +151,17 @@ func TestReconcile(t *testing.T) {
 	}
 
 	testcases := []struct {
-		name           string
-		agentPoolsSpec azure.AgentPoolSpec
-		expectedError  string
-		expect         func(m *mock_agentpools.MockClientMockRecorder)
+		name                          string
+		managedControlPlaneSubnetSpec subnets.SubnetSpec
+		agentPoolsSpec                azure.AgentPoolSpec
+		expectedError                 string
+		expect                        func(m *mock_agentpools.MockClientMockRecorder)
 	}{
 		{
 			name: "no agentpool exists",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				ResourceGroup: "my-rg",
 				Cluster:       "my-cluster",
@@ -150,6 +175,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "fail to get existing agent pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -159,7 +187,7 @@ func TestReconcile(t *testing.T) {
 				Replicas:      2,
 				OSDiskSizeGB:  100,
 				MaxPods:       to.Int32Ptr(12),
-				OsDiskType:    to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:    to.StringPtr(string(containerservice.Managed)),
 			},
 			expectedError: "failed to get existing agent pool: #: Internal Server Error: StatusCode=500",
 			expect: func(m *mock_agentpools.MockClientMockRecorder) {
@@ -168,6 +196,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "can create an Agent Pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -177,7 +208,7 @@ func TestReconcile(t *testing.T) {
 				Replicas:      2,
 				OSDiskSizeGB:  100,
 				MaxPods:       to.Int32Ptr(12),
-				OsDiskType:    to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:    to.StringPtr(string(containerservice.Managed)),
 			},
 			expectedError: "",
 			expect: func(m *mock_agentpools.MockClientMockRecorder) {
@@ -187,6 +218,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "fail to create an Agent Pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -196,7 +230,7 @@ func TestReconcile(t *testing.T) {
 				Replicas:      2,
 				OSDiskSizeGB:  100,
 				MaxPods:       to.Int32Ptr(12),
-				OsDiskType:    to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:    to.StringPtr(string(containerservice.Managed)),
 			},
 			expectedError: "failed to create or update agent pool: #: Internal Server Error: StatusCode=500",
 			expect: func(m *mock_agentpools.MockClientMockRecorder) {
@@ -206,6 +240,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "fail to update an Agent Pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -215,7 +252,7 @@ func TestReconcile(t *testing.T) {
 				Replicas:      2,
 				OSDiskSizeGB:  100,
 				MaxPods:       to.Int32Ptr(12),
-				OsDiskType:    to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:    to.StringPtr(string(containerservice.Managed)),
 			},
 			expectedError: "failed to create or update agent pool: #: Internal Server Error: StatusCode=500",
 			expect: func(m *mock_agentpools.MockClientMockRecorder) {
@@ -223,7 +260,7 @@ func TestReconcile(t *testing.T) {
 					ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
 						Count:               to.Int32Ptr(3),
 						OsDiskSizeGB:        to.Int32Ptr(20),
-						VMSize:              to.StringPtr(string(containerservice.VMSizeTypesStandardA1)),
+						VMSize:              to.StringPtr(string(containerservice.StandardA1)),
 						OrchestratorVersion: to.StringPtr("9.99.9999"),
 						ProvisioningState:   to.StringPtr("Failed"),
 					},
@@ -233,6 +270,9 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "no update needed on Agent Pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -242,7 +282,7 @@ func TestReconcile(t *testing.T) {
 				Replicas:      2,
 				OSDiskSizeGB:  100,
 				MaxPods:       to.Int32Ptr(12),
-				OsDiskType:    to.StringPtr(string(containerservice.OSDiskTypeEphemeral)),
+				OsDiskType:    to.StringPtr(string(containerservice.Ephemeral)),
 			},
 			expectedError: "",
 			expect: func(m *mock_agentpools.MockClientMockRecorder) {
@@ -250,13 +290,13 @@ func TestReconcile(t *testing.T) {
 					ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
 						Count:               to.Int32Ptr(2),
 						OsDiskSizeGB:        to.Int32Ptr(100),
-						VMSize:              to.StringPtr(string(containerservice.VMSizeTypesStandardD2sV3)),
-						OsType:              containerservice.OSTypeLinux,
+						VMSize:              to.StringPtr(string(containerservice.StandardD2sV3)),
+						OsType:              containerservice.Linux,
 						OrchestratorVersion: to.StringPtr("9.99.9999"),
 						ProvisioningState:   to.StringPtr("Succeeded"),
 						VnetSubnetID:        to.StringPtr(""),
 						MaxPods:             to.Int32Ptr(12),
-						OsDiskType:          containerservice.OSDiskTypeEphemeral,
+						OsDiskType:          containerservice.Ephemeral,
 					},
 				}, nil)
 			},
@@ -276,6 +316,18 @@ func TestReconcile(t *testing.T) {
 			osDiskSizeGB := tc.agentPoolsSpec.OSDiskSizeGB
 
 			agentpoolsMock := mock_agentpools.NewMockClient(mockCtrl)
+			infraMachinePool := &infraexpv1.AzureManagedMachinePool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: tc.agentPoolsSpec.Name,
+				},
+				Spec: infraexpv1.AzureManagedMachinePoolSpec{
+					Name:         &tc.agentPoolsSpec.Name,
+					SKU:          tc.agentPoolsSpec.SKU,
+					OSDiskSizeGB: &osDiskSizeGB,
+					MaxPods:      to.Int32Ptr(12),
+					OsDiskType:   to.StringPtr(string(containerservice.Managed)),
+				},
+			}
 			machinePoolScope := &scope.ManagedControlPlaneScope{
 				ControlPlane: &infraexpv1.AzureManagedControlPlane{
 					ObjectMeta: metav1.ObjectMeta{
@@ -283,6 +335,13 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: infraexpv1.AzureManagedControlPlaneSpec{
 						ResourceGroupName: tc.agentPoolsSpec.ResourceGroup,
+						VirtualNetwork: infraexpv1.ManagedControlPlaneVirtualNetwork{
+							Subnets: []infraexpv1.ManagedControlPlaneSubnet{
+								{
+									Name: tc.managedControlPlaneSubnetSpec.Name,
+								},
+							},
+						},
 					},
 				},
 				MachinePool: &capiexp.MachinePool{
@@ -295,18 +354,8 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				InfraMachinePool: &infraexpv1.AzureManagedMachinePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: tc.agentPoolsSpec.Name,
-					},
-					Spec: infraexpv1.AzureManagedMachinePoolSpec{
-						Name:         &tc.agentPoolsSpec.Name,
-						SKU:          tc.agentPoolsSpec.SKU,
-						OSDiskSizeGB: &osDiskSizeGB,
-						MaxPods:      to.Int32Ptr(12),
-						OsDiskType:   to.StringPtr(string(containerservice.OSDiskTypeManaged)),
-					},
-				},
+				InfraMachinePool: infraMachinePool,
+				PatchTarget:      infraMachinePool,
 			}
 
 			tc.expect(agentpoolsMock.EXPECT())
@@ -318,9 +367,11 @@ func TestReconcile(t *testing.T) {
 
 			err := s.Reconcile(context.TODO())
 			if tc.expectedError != "" {
+				g.Expect(conditions.IsFalse(machinePoolScope.InfraMachinePool, capi.ReadyCondition)).To(BeTrue())
 				g.Expect(err).To(HaveOccurred())
 				g.Expect(err).To(MatchError(tc.expectedError))
 			} else {
+				g.Expect(conditions.IsTrue(machinePoolScope.InfraMachinePool, capi.ReadyCondition)).To(BeTrue())
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 		})
@@ -329,13 +380,17 @@ func TestReconcile(t *testing.T) {
 
 func TestDeleteAgentPools(t *testing.T) {
 	testcases := []struct {
-		name           string
-		agentPoolsSpec azure.AgentPoolSpec
-		expectedError  string
-		expect         func(m *mock_agentpools.MockClientMockRecorder)
+		name                          string
+		managedControlPlaneSubnetSpec subnets.SubnetSpec
+		agentPoolsSpec                azure.AgentPoolSpec
+		expectedError                 string
+		expect                        func(m *mock_agentpools.MockClientMockRecorder)
 	}{
 		{
 			name: "successfully delete an existing agent pool",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -348,6 +403,9 @@ func TestDeleteAgentPools(t *testing.T) {
 		},
 		{
 			name: "agent pool already deleted",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -361,6 +419,9 @@ func TestDeleteAgentPools(t *testing.T) {
 		},
 		{
 			name: "agent pool deletion fails",
+			managedControlPlaneSubnetSpec: subnets.SubnetSpec{
+				Name: "my-subnet",
+			},
 			agentPoolsSpec: azure.AgentPoolSpec{
 				Name:          "my-agent-pool",
 				ResourceGroup: "my-rg",
@@ -390,6 +451,13 @@ func TestDeleteAgentPools(t *testing.T) {
 					},
 					Spec: infraexpv1.AzureManagedControlPlaneSpec{
 						ResourceGroupName: tc.agentPoolsSpec.ResourceGroup,
+						VirtualNetwork: infraexpv1.ManagedControlPlaneVirtualNetwork{
+							Subnets: []infraexpv1.ManagedControlPlaneSubnet{
+								{
+									Name: tc.managedControlPlaneSubnetSpec.Name,
+								},
+							},
+						},
 					},
 				},
 				MachinePool: &capiexp.MachinePool{},
