@@ -23,6 +23,8 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	ratelimiterutil "sigs.k8s.io/cluster-api-provider-azure/util/ratelimiter"
+	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
 	"time"
 
 	// +kubebuilder:scaffold:imports
@@ -115,6 +117,7 @@ var (
 	webhookPort                        int
 	reconcileTimeout                   time.Duration
 	enableTracing                      bool
+	periodicReconcileDuration          time.Duration
 )
 
 // InitFlags initializes all command-line flags.
@@ -239,6 +242,13 @@ func InitFlags(fs *pflag.FlagSet) {
 		"enable-tracing",
 		false,
 		"Enable tracing to the opentelemetry-collector service in the same namespace.",
+	)
+
+	fs.DurationVar(
+		&periodicReconcileDuration,
+		"periodic-reconcile-duration",
+		30*time.Minute,
+		"Duration between periodic reconciliations",
 	)
 
 	feature.MutableGates.AddFlag(fs)
@@ -391,6 +401,7 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("azuremachinepool-reconciler"),
 			reconcileTimeout,
+			periodicReconcileDuration,
 			watchFilterValue,
 		).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency}, Cache: mpCache}); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AzureMachinePool")
@@ -423,6 +434,10 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 		}
 
 		if feature.Gates.Enabled(feature.AKS) {
+			var machinePoolRateLimiter ratelimiter.RateLimiter
+			if feature.Gates.Enabled(feature.AksUsePerSubscriptionRateLimiter) {
+				machinePoolRateLimiter = ratelimiterutil.PerAccountBucketRateLimiter(mgr.GetClient(), setupLog, ratelimiterutil.GetGroupKeyFromManagedMachinePool)
+			}
 			mmpmCache, err := coalescing.NewRequestCache(debouncingTimer)
 			if err != nil {
 				setupLog.Error(err, "failed to build mmpmCache ReconcileCache")
@@ -433,7 +448,7 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 				mgr.GetEventRecorderFor("azuremanagedmachinepoolmachine-reconciler"),
 				reconcileTimeout,
 				watchFilterValue,
-			).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency}, Cache: mmpmCache}); err != nil {
+			).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency, RateLimiter: machinePoolRateLimiter}, Cache: mmpmCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedMachinePool")
 				os.Exit(1)
 			}
@@ -443,12 +458,18 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 				setupLog.Error(err, "failed to build mcCache ReconcileCache")
 			}
 
+			// Managed Cluster and ControlPlane use the same name, so we can use the same ratelimiter that fetches
+			// subscription id from controlplane.
+			var managedClusterRateLimiter ratelimiter.RateLimiter
+			if feature.Gates.Enabled(feature.AksUsePerSubscriptionRateLimiter) {
+				managedClusterRateLimiter = ratelimiterutil.PerAccountBucketRateLimiter(mgr.GetClient(), setupLog, ratelimiterutil.GetGroupKeyFromControlPlane)
+			}
 			if err := (&infrav1controllersexp.AzureManagedClusterReconciler{
 				Client:           mgr.GetClient(),
 				Recorder:         mgr.GetEventRecorderFor("azuremanagedcluster-reconciler"),
 				ReconcileTimeout: reconcileTimeout,
 				WatchFilterValue: watchFilterValue,
-			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency}, Cache: mcCache}); err != nil {
+			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency, RateLimiter: managedClusterRateLimiter}, Cache: mcCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedCluster")
 				os.Exit(1)
 			}
@@ -463,7 +484,7 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 				Recorder:         mgr.GetEventRecorderFor("azuremanagedcontrolplane-reconciler"),
 				ReconcileTimeout: reconcileTimeout,
 				WatchFilterValue: watchFilterValue,
-			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency}, Cache: mcpCache}); err != nil {
+			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency, RateLimiter: managedClusterRateLimiter}, Cache: mcpCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedControlPlane")
 				os.Exit(1)
 			}

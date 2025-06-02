@@ -36,6 +36,7 @@ type TagScope interface {
 	TagsSpecs() []azure.TagsSpec
 	AnnotationJSON(string) (map[string]interface{}, error)
 	UpdateAnnotationJSON(string, map[string]interface{}) error
+	IsNotPaused() bool
 }
 
 // Service provides operations on Azure resources.
@@ -61,6 +62,10 @@ func (s *Service) Name() string {
 func (s *Service) Reconcile(ctx context.Context) error {
 	ctx, log, done := tele.StartSpanWithLogger(ctx, "tags.Service.Reconcile")
 	defer done()
+
+	if !s.Scope.IsNotPaused() {
+		return nil
+	}
 
 	for _, tagsSpec := range s.Scope.TagsSpecs() {
 		existingTags, err := s.client.GetAtScope(ctx, tagsSpec.Scope)

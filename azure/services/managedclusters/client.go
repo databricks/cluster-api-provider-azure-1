@@ -19,7 +19,7 @@ package managedclusters
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/pkg/errors"
 	"sigs.k8s.io/cluster-api-provider-azure/azure"
@@ -65,7 +65,7 @@ func (ac *AzureClient) GetCredentials(ctx context.Context, resourceGroupName, na
 	ctx, _, done := tele.StartSpanWithLogger(ctx, "managedclusters.AzureClient.GetCredentials")
 	defer done()
 
-	credentialList, err := ac.managedclusters.ListClusterAdminCredentials(ctx, resourceGroupName, name, "")
+	credentialList, err := ac.managedclusters.ListClusterUserCredentials(ctx, resourceGroupName, name, "", containerservice.Exec)
 	if err != nil {
 		return nil, err
 	}

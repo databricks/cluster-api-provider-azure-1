@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sigs.k8s.io/cluster-api-provider-azure/pkg/ratelimit"
 	"time"
 
 	"github.com/pkg/errors"
@@ -77,6 +78,9 @@ func (amcpr *AzureManagedControlPlaneReconciler) SetupWithManager(ctx context.Co
 	// map requests for machine pools corresponding to AzureManagedControlPlane's defaultPool back to the corresponding AzureManagedControlPlane.
 	azureManagedMachinePoolMapper := MachinePoolToAzureManagedControlPlaneMapFunc(ctx, amcpr.Client, infrav1exp.GroupVersion.WithKind("AzureManagedControlPlane"), log)
 
+	// map requests for Cluster corresponding to AzureManagedControlPlane back to the corresponding AzureManagedControlPlane.
+	clusterMapper := ClusterToAzureManagedControlPlaneMapper(log)
+
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		WithOptions(options.Options).
 		For(azManagedControlPlane).
@@ -84,12 +88,17 @@ func (amcpr *AzureManagedControlPlaneReconciler) SetupWithManager(ctx context.Co
 		// watch AzureManagedCluster resources
 		Watches(
 			&source.Kind{Type: &infrav1exp.AzureManagedCluster{}},
-			handler.EnqueueRequestsFromMapFunc(azureManagedClusterMapper),
+			ratelimit.EnqueueRequestsFromMapFunc(azureManagedClusterMapper),
 		).
 		// watch MachinePool resources
 		Watches(
 			&source.Kind{Type: &clusterv1exp.MachinePool{}},
-			handler.EnqueueRequestsFromMapFunc(azureManagedMachinePoolMapper),
+			ratelimit.EnqueueRequestsFromMapFunc(azureManagedMachinePoolMapper),
+		).
+		// Add a watch on clusterv1.Cluster object for unpause notifications.
+		Watches(
+			&source.Kind{Type: &clusterv1.Cluster{}},
+			ratelimit.EnqueueRequestsFromMapFunc(clusterMapper),
 		).
 		Build(r)
 	if err != nil {
@@ -147,8 +156,8 @@ func (amcpr *AzureManagedControlPlaneReconciler) Reconcile(ctx context.Context, 
 
 	log = log.WithValues("cluster", cluster.Name)
 
-	// Return early if the object or Cluster is paused.
-	if annotations.IsPaused(cluster, azureControlPlane) {
+	// Only return early if it's paused with the manual pause annotation. Do not return early if it's paused due to staged update
+	if annotations.IsPaused(cluster, azureControlPlane) && cluster.ObjectMeta.Annotations != nil && cluster.ObjectMeta.Annotations[infrav1exp.AnnotationPaused] == "true" {
 		log.Info("AzureManagedControlPlane or linked Cluster is marked as paused. Won't reconcile")
 		return ctrl.Result{}, nil
 	}

@@ -18,9 +18,11 @@ package v1beta1
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"reflect"
 	"regexp"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,8 +30,8 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	infrav1 "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
+	webhook_utils "sigs.k8s.io/cluster-api-provider-azure/util/webhook"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 var kubeSemver = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-0-9a-zA-Z_\.+]*)?$`)
@@ -65,14 +67,10 @@ func (m *AzureManagedControlPlane) Default() {
 		m.Spec.Version = normalizedVersion
 	}
 
-	if err := m.setDefaultSSHPublicKey(); err != nil {
-		ctrl.Log.WithName("AzureManagedControlPlaneWebHookLogger").Error(err, "SetDefaultSshPublicKey failed")
-	}
-
 	m.setDefaultNodeResourceGroupName()
 	m.setDefaultVirtualNetwork()
-	m.setDefaultSubnet()
 	m.setDefaultSku()
+	m.setDefaultSubnets()
 }
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-infrastructure-cluster-x-k8s-io-v1beta1-azuremanagedcontrolplane,mutating=false,failurePolicy=fail,groups=infrastructure.cluster.x-k8s.io,resources=azuremanagedcontrolplanes,versions=v1beta1,name=validation.azuremanagedcontrolplanes.infrastructure.cluster.x-k8s.io,sideEffects=None,admissionReviewVersions=v1;v1beta1
@@ -121,15 +119,25 @@ func (m *AzureManagedControlPlane) ValidateUpdate(oldRaw runtime.Object) error {
 				"field is immutable"))
 	}
 
-	if old.Spec.SSHPublicKey != "" {
-		// Prevent SSH key modification if it was already set to some value
-		if m.Spec.SSHPublicKey != old.Spec.SSHPublicKey {
-			allErrs = append(allErrs,
-				field.Invalid(
-					field.NewPath("Spec", "SSHPublicKey"),
-					m.Spec.SSHPublicKey,
-					"field is immutable"))
-		}
+	if !reflect.DeepEqual(m.Spec.SSHPublicKey, old.Spec.SSHPublicKey) {
+		allErrs = append(allErrs,
+			field.Invalid(field.NewPath("Spec", "SSHPublicKey"),
+				m.Spec.SSHPublicKey, "field is immutable"),
+		)
+	}
+
+	if !reflect.DeepEqual(m.Spec.VirtualNetwork, old.Spec.VirtualNetwork) {
+		allErrs = append(allErrs,
+			field.Invalid(field.NewPath("Spec", "VirtualNetwork"),
+				m.Spec.VirtualNetwork, "field is immutable"),
+		)
+	}
+
+	if !reflect.DeepEqual(m.Spec.VirtualNetwork, old.Spec.VirtualNetwork) {
+		allErrs = append(allErrs,
+			field.Invalid(field.NewPath("Spec", "VirtualNetwork"),
+				m.Spec.VirtualNetwork, "field is immutable"),
+		)
 	}
 
 	if old.Spec.DNSServiceIP != nil {
@@ -208,6 +216,13 @@ func (m *AzureManagedControlPlane) ValidateUpdate(oldRaw runtime.Object) error {
 		}
 	}
 
+	if err := webhook_utils.ValidateImmutable(
+		field.NewPath("Spec", "AzureEnvironment"),
+		old.Spec.AzureEnvironment,
+		m.Spec.AzureEnvironment); err != nil {
+		allErrs = append(allErrs, err)
+	}
+
 	if old.Spec.AADProfile != nil {
 		if m.Spec.AADProfile == nil {
 			allErrs = append(allErrs,
@@ -246,7 +261,14 @@ func (m *AzureManagedControlPlane) ValidateUpdate(oldRaw runtime.Object) error {
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type.
 func (m *AzureManagedControlPlane) ValidateDelete() error {
-	return nil
+	var allErrs field.ErrorList
+	if deletionAllowedErrs := m.validateDeleteAllowed(); len(deletionAllowedErrs) > 0 {
+		allErrs = append(allErrs, deletionAllowedErrs...)
+	}
+	if len(allErrs) == 0 {
+		return nil
+	}
+	return apierrors.NewInvalid(GroupVersion.WithKind("AzureManagedControlPlane").GroupKind(), m.Name, allErrs)
 }
 
 // Validate the Azure Machine Pool and return an aggregate error.
@@ -257,6 +279,8 @@ func (m *AzureManagedControlPlane) Validate() error {
 		m.validateSSHKey,
 		m.validateLoadBalancerProfile,
 		m.validateAPIServerAccessProfile,
+		m.validateVnet,
+		m.validateSubnets,
 	}
 
 	var errs []error
@@ -290,8 +314,8 @@ func (m *AzureManagedControlPlane) validateVersion() error {
 
 // ValidateSSHKey validates an SSHKey.
 func (m *AzureManagedControlPlane) validateSSHKey() error {
-	if m.Spec.SSHPublicKey != "" {
-		sshKey := m.Spec.SSHPublicKey
+	if m.Spec.SSHPublicKey != nil {
+		sshKey := *m.Spec.SSHPublicKey
 		if errs := infrav1.ValidateSSHKey(sshKey, field.NewPath("sshKey")); len(errs) > 0 {
 			return kerrors.NewAggregate(errs.ToAggregate().Errors())
 		}
@@ -365,6 +389,41 @@ func (m *AzureManagedControlPlane) validateAPIServerAccessProfile() error {
 	return nil
 }
 
+// validateVnet validates virtual network.
+func (m *AzureManagedControlPlane) validateVnet() error {
+	var allErrs field.ErrorList
+	for _, cidr := range m.Spec.VirtualNetwork.CIDRBlocks {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("Spec", "VirtualNetwork", "CIDRBlocks"), cidr, "invalid CIDR format"))
+		}
+	}
+	if len(allErrs) > 0 {
+		agg := kerrors.NewAggregate(allErrs.ToAggregate().Errors())
+		return agg
+	}
+	return nil
+}
+
+// validateSubnets validates subnets.
+func (m *AzureManagedControlPlane) validateSubnets() error {
+	var allErrs field.ErrorList
+	for _, subnet := range m.Spec.VirtualNetwork.Subnets {
+		if len(subnet.CIDRBlocks) == 0 {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("Spec", "VirtualNetwork", "Subnets"), subnet, "subnet must have at least one CIDR block"))
+		}
+		for _, cidr := range subnet.CIDRBlocks {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				allErrs = append(allErrs, field.Invalid(field.NewPath("Spec", "VirtualNetwork", "Subnets", "CIDRBlocks"), cidr, "invalid CIDR format"))
+			}
+		}
+	}
+	if len(allErrs) > 0 {
+		agg := kerrors.NewAggregate(allErrs.ToAggregate().Errors())
+		return agg
+	}
+	return nil
+}
+
 // validateAPIServerAccessProfileUpdate validates update to APIServerAccessProfile.
 func (m *AzureManagedControlPlane) validateAPIServerAccessProfileUpdate(old *AzureManagedControlPlane) field.ErrorList {
 	var allErrs field.ErrorList
@@ -393,5 +452,19 @@ func (m *AzureManagedControlPlane) validateAPIServerAccessProfileUpdate(old *Azu
 		)
 	}
 
+	return allErrs
+}
+
+func (m *AzureManagedControlPlane) validateDeleteAllowed() field.ErrorList {
+	var allErrs field.ErrorList
+
+	if _, ok := m.GetAnnotations()[infrav1.PreventAccidentalDeletionAnnotation]; ok {
+		allErrs = append(allErrs,
+			field.Forbidden(
+				field.NewPath("metadata", "annotations"),
+				fmt.Sprintf("%s annotation must be removed before proceeding with deletion", infrav1.PreventAccidentalDeletionAnnotation),
+			),
+		)
+	}
 	return allErrs
 }

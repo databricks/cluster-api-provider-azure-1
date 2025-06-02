@@ -117,6 +117,10 @@ func (ac *azureClient) IsDone(ctx context.Context, future azureautorest.FutureAP
 
 	isDone, err = future.DoneWithContext(ctx, ac.groups)
 	if err != nil {
+		// If the async operation is not found, we mark it as done so CAPZ would clear long running operation state and continue with the deletion
+		if azure.OperationNotFound(err) {
+			return true, nil
+		}
 		return false, errors.Wrap(err, "failed checking if the operation was complete")
 	}
 

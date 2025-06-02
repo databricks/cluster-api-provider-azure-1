@@ -55,6 +55,7 @@ type (
 		ReconcileTimeout              time.Duration
 		WatchFilterValue              string
 		createAzureMachinePoolService azureMachinePoolServiceCreator
+		periodicReconcileDuration     time.Duration
 	}
 
 	// annotationReaderWriter provides an interface to read and write annotations.
@@ -67,12 +68,13 @@ type (
 type azureMachinePoolServiceCreator func(machinePoolScope *scope.MachinePoolScope) (*azureMachinePoolService, error)
 
 // NewAzureMachinePoolReconciler returns a new AzureMachinePoolReconciler instance.
-func NewAzureMachinePoolReconciler(client client.Client, recorder record.EventRecorder, reconcileTimeout time.Duration, watchFilterValue string) *AzureMachinePoolReconciler {
+func NewAzureMachinePoolReconciler(client client.Client, recorder record.EventRecorder, reconcileTimeout, periodicReconcileDuration time.Duration, watchFilterValue string) *AzureMachinePoolReconciler {
 	ampr := &AzureMachinePoolReconciler{
-		Client:           client,
-		Recorder:         recorder,
-		ReconcileTimeout: reconcileTimeout,
-		WatchFilterValue: watchFilterValue,
+		Client:                    client,
+		Recorder:                  recorder,
+		ReconcileTimeout:          reconcileTimeout,
+		WatchFilterValue:          watchFilterValue,
+		periodicReconcileDuration: periodicReconcileDuration,
 	}
 
 	ampr.createAzureMachinePoolService = newAzureMachinePoolService
@@ -173,19 +175,19 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 	err := ampr.Get(ctx, req.NamespacedName, azMachinePool)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return reconcile.Result{}, nil
+			return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 		}
-		return reconcile.Result{}, err
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, err
 	}
 
 	// Fetch the CAPI MachinePool.
 	machinePool, err := infracontroller.GetOwnerMachinePool(ctx, ampr.Client, azMachinePool.ObjectMeta)
 	if err != nil {
-		return reconcile.Result{}, err
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, err
 	}
 	if machinePool == nil {
 		logger.V(2).Info("MachinePool Controller has not yet set OwnerRef")
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 	}
 
 	logger = logger.WithValues("machinePool", machinePool.Name)
@@ -194,7 +196,7 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 	cluster, err := util.GetClusterFromMetadata(ctx, ampr.Client, machinePool.ObjectMeta)
 	if err != nil {
 		logger.V(2).Info("MachinePool is missing cluster label or cluster does not exist")
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 	}
 
 	logger = logger.WithValues("cluster", cluster.Name)
@@ -202,7 +204,7 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Return early if the object or Cluster is paused.
 	if annotations.IsPaused(cluster, azMachinePool) {
 		logger.V(2).Info("AzureMachinePool or linked Cluster is marked as paused. Won't reconcile")
-		return ctrl.Result{}, nil
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 	}
 
 	logger = logger.WithValues("AzureCluster", cluster.Spec.InfrastructureRef.Name)
@@ -213,7 +215,7 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 	azureCluster := &infrav1.AzureCluster{}
 	if err := ampr.Client.Get(ctx, azureClusterName, azureCluster); err != nil {
 		logger.V(2).Info("AzureCluster is not available yet")
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 	}
 
 	// Create the cluster scope
@@ -223,7 +225,7 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 		AzureCluster: azureCluster,
 	})
 	if err != nil {
-		return reconcile.Result{}, err
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, err
 	}
 
 	// Create the machine pool scope
@@ -234,7 +236,7 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 		ClusterScope:     clusterScope,
 	})
 	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to create scope")
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, errors.Wrap(err, "failed to create scope")
 	}
 
 	// Always close the scope when exiting this function so we can persist any AzureMachine changes.
@@ -246,11 +248,19 @@ func (ampr *AzureMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Handle deleted machine pools
 	if !azMachinePool.ObjectMeta.DeletionTimestamp.IsZero() {
-		return ampr.reconcileDelete(ctx, machinePoolScope, clusterScope)
+		result, err := ampr.reconcileDelete(ctx, machinePoolScope, clusterScope)
+		if err != nil {
+			return result, err
+		}
+		return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 	}
 
 	// Handle non-deleted machine pools
-	return ampr.reconcileNormal(ctx, machinePoolScope, clusterScope)
+	result, err := ampr.reconcileNormal(ctx, machinePoolScope, clusterScope)
+	if err != nil {
+		return result, err
+	}
+	return reconcile.Result{RequeueAfter: ampr.periodicReconcileDuration}, nil
 }
 
 func (ampr *AzureMachinePoolReconciler) reconcileNormal(ctx context.Context, machinePoolScope *scope.MachinePoolScope, clusterScope *scope.ClusterScope) (_ reconcile.Result, reterr error) {
