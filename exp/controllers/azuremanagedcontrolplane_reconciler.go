@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"k8s.io/klog/v2"
 
 	"github.com/pkg/errors"
 	"sigs.k8s.io/cluster-api-provider-azure/azure"
@@ -92,8 +93,11 @@ func (r *azureManagedControlPlaneService) reconcileKubeconfig(ctx context.Contex
 	ctx, _, done := tele.StartSpanWithLogger(ctx, "controllers.azureManagedControlPlaneService.reconcileKubeconfig")
 	defer done()
 
+	klog.V(2).Infof("Reconciling kubeconfig")
+
 	kubeConfigData := r.scope.GetKubeConfigData()
 	if kubeConfigData == nil {
+		klog.V(2).Infof("Empty kubeconfig data")
 		return nil
 	}
 	kubeConfigSecret := r.scope.MakeEmptyKubeConfigSecret()

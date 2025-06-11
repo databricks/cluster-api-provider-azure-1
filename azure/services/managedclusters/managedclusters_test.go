@@ -18,10 +18,12 @@ package managedclusters
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	infrav1alpha4 "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
@@ -46,7 +48,7 @@ func TestReconcile(t *testing.T) {
 			expect: func(m *mock_managedclusters.MockClientMockRecorder, provisioningstate string, s *mock_managedclusters.MockManagedClusterScopeMockRecorder) {
 				m.CreateOrUpdate(gomockinternal.AContext(), "my-rg", "my-managedcluster", gomock.Any(), map[string]string{"myFeature": "true"}).Return(containerservice.ManagedCluster{ManagedClusterProperties: &containerservice.ManagedClusterProperties{
 					Fqdn:              pointer.String("my-managedcluster-fqdn"),
-					ProvisioningState: &provisioningstate,
+					ProvisioningState: pointer.String("Succeeded"),
 				}}, nil)
 				m.Get(gomockinternal.AContext(), "my-rg", "my-managedcluster").Return(containerservice.ManagedCluster{ManagedClusterProperties: &containerservice.ManagedClusterProperties{
 					Fqdn:              pointer.String("my-managedcluster-fqdn"),
@@ -63,6 +65,7 @@ func TestReconcile(t *testing.T) {
 					Name:              "my-managedcluster",
 					ResourceGroupName: "my-rg",
 				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 				s.SetControlPlaneEndpoint(gomock.Any()).Times(1)
 				s.SetKubeConfigData(gomock.Any()).Times(1)
 			},
@@ -82,6 +85,7 @@ func TestReconcile(t *testing.T) {
 					Name:              "my-managedcluster",
 					ResourceGroupName: "my-rg",
 				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 			},
 		},
 	}
@@ -146,6 +150,7 @@ func TestReconcile(t *testing.T) {
 						OSDiskSizeGB: 0,
 					},
 				}, nil)
+				s.UpdatePutStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 				s.SetControlPlaneEndpoint(gomock.Eq(clusterv1.APIEndpoint{
 					Host: "my-managedcluster-fqdn",
 					Port: 443,
@@ -174,6 +179,7 @@ func TestReconcile(t *testing.T) {
 						OSDiskSizeGB: 0,
 					},
 				}, nil)
+				s.UpdatePutStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 			},
 		},
 		{
@@ -209,11 +215,97 @@ func TestReconcile(t *testing.T) {
 						OSDiskSizeGB: 0,
 					},
 				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 				s.SetControlPlaneEndpoint(gomock.Eq(clusterv1.APIEndpoint{
 					Host: "my-managedcluster-fqdn",
 					Port: 443,
 				})).Times(1)
 				s.SetKubeConfigData(gomock.Any()).Times(1)
+			},
+		},
+		{
+			name:          "update MC if existing MC provisioning state is Failed",
+			expectedError: "",
+			expect: func(m *mock_managedclusters.MockClientMockRecorder, s *mock_managedclusters.MockManagedClusterScopeMockRecorder) {
+				m.CreateOrUpdate(gomockinternal.AContext(), "my-rg", "my-managedcluster", gomock.Any(), gomock.Any()).Return(containerservice.ManagedCluster{
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn-updated"),
+						ProvisioningState: pointer.String("Succeeded"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil)
+				m.Get(gomockinternal.AContext(), "my-rg", "my-managedcluster").Return(containerservice.ManagedCluster{
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn"),
+						ProvisioningState: pointer.String("Failed"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil).Times(1)
+				m.GetCredentials(gomockinternal.AContext(), "my-rg", "my-managedcluster").Times(1)
+				s.ClusterName().AnyTimes().Return("my-managedcluster")
+				s.ResourceGroup().AnyTimes().Return("my-rg")
+				s.ManagedClusterAnnotations().Times(1).Return(map[string]string{})
+				s.ManagedClusterSpec().AnyTimes().Return(azure.ManagedClusterSpec{
+					Name:              "my-managedcluster",
+					ResourceGroupName: "my-rg",
+					Version:           "1.1",
+				}, nil)
+				s.GetAllAgentPoolSpecs(gomockinternal.AContext()).AnyTimes().Return([]azure.AgentPoolSpec{
+					{
+						Name:         "my-agentpool",
+						SKU:          "Standard_D4s_v3",
+						Replicas:     1,
+						OSDiskSizeGB: 0,
+					},
+				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Nil()).Times(1)
+				s.SetControlPlaneEndpoint(gomock.Eq(clusterv1.APIEndpoint{
+					Host: "my-managedcluster-fqdn-updated",
+					Port: 443,
+				})).Times(1)
+				s.SetKubeConfigData(gomock.Any()).Times(1)
+			},
+		},
+		{
+			name:          "update MC if existing MC provisioning state is Failed and update status if it fails again",
+			expectedError: "failed to update managed cluster, managed cluster provisioning state is failed",
+			expect: func(m *mock_managedclusters.MockClientMockRecorder, s *mock_managedclusters.MockManagedClusterScopeMockRecorder) {
+				m.CreateOrUpdate(gomockinternal.AContext(), "my-rg", "my-managedcluster", gomock.Any(), gomock.Any()).Return(containerservice.ManagedCluster{
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn-updated"),
+						ProvisioningState: pointer.String("Failed"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil)
+				m.Get(gomockinternal.AContext(), "my-rg", "my-managedcluster").Return(containerservice.ManagedCluster{
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn"),
+						ProvisioningState: pointer.String("Failed"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil).Times(1)
+				s.ClusterName().AnyTimes().Return("my-managedcluster")
+				s.ResourceGroup().AnyTimes().Return("my-rg")
+				s.ManagedClusterAnnotations().Times(1).Return(map[string]string{})
+				s.ManagedClusterSpec().AnyTimes().Return(azure.ManagedClusterSpec{
+					Name:              "my-managedcluster",
+					ResourceGroupName: "my-rg",
+					Version:           "1.1",
+				}, nil)
+				s.GetAllAgentPoolSpecs(gomockinternal.AContext()).AnyTimes().Return([]azure.AgentPoolSpec{
+					{
+						Name:         "my-agentpool",
+						SKU:          "Standard_D4s_v3",
+						Replicas:     1,
+						OSDiskSizeGB: 0,
+					},
+				}, nil)
+				expectedError := fmt.Errorf("managed cluster provisioning state is failed")
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, expectedError).Times(1)
 			},
 		},
 		{
@@ -245,8 +337,58 @@ func TestReconcile(t *testing.T) {
 						OSDiskSizeGB: 0,
 					},
 				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Any()).Times(1)
 				s.SetControlPlaneEndpoint(gomock.Eq(clusterv1.APIEndpoint{
 					Host: "my-managedcluster-fqdn",
+					Port: 443,
+				})).Times(1)
+				s.SetKubeConfigData(gomock.Any()).Times(1)
+			},
+		}, {
+			name:          "update MC if tags changed",
+			expectedError: "",
+			expect: func(m *mock_managedclusters.MockClientMockRecorder, s *mock_managedclusters.MockManagedClusterScopeMockRecorder) {
+				currentTag := "foo"
+				newTag := "bar"
+				m.CreateOrUpdate(gomockinternal.AContext(), "my-rg", "my-managedcluster", gomock.Any(), gomock.Any()).Return(containerservice.ManagedCluster{
+					Tags: map[string]*string{"tag": &newTag},
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn-updated"),
+						ProvisioningState: pointer.String("Succeeded"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil)
+				m.Get(gomockinternal.AContext(), "my-rg", "my-managedcluster").Return(containerservice.ManagedCluster{
+					Tags: map[string]*string{"tag": &currentTag},
+					ManagedClusterProperties: &containerservice.ManagedClusterProperties{
+						Fqdn:              pointer.String("my-managedcluster-fqdn-updated"),
+						ProvisioningState: pointer.String("Succeeded"),
+						KubernetesVersion: pointer.String("1.1"),
+						NetworkProfile:    &containerservice.NetworkProfile{},
+					},
+				}, nil).Times(1)
+				m.GetCredentials(gomockinternal.AContext(), "my-rg", "my-managedcluster").Times(1)
+				s.ClusterName().AnyTimes().Return("my-managedcluster")
+				s.ResourceGroup().AnyTimes().Return("my-rg")
+				s.ManagedClusterAnnotations().Times(1).Return(map[string]string{})
+				s.ManagedClusterSpec().AnyTimes().Return(azure.ManagedClusterSpec{
+					Name:              "my-managedcluster",
+					ResourceGroupName: "my-rg",
+					Version:           "1.1",
+					Tags:              map[string]string{"tag": newTag},
+				}, nil)
+				s.GetAllAgentPoolSpecs(gomockinternal.AContext()).AnyTimes().Return([]azure.AgentPoolSpec{
+					{
+						Name:         "my-agentpool",
+						SKU:          "Standard_D4s_v3",
+						Replicas:     1,
+						OSDiskSizeGB: 0,
+					},
+				}, nil)
+				s.UpdatePatchStatus(infrav1alpha4.ManagedClusterRunningCondition, serviceName, gomock.Nil()).Times(1)
+				s.SetControlPlaneEndpoint(gomock.Eq(clusterv1.APIEndpoint{
+					Host: "my-managedcluster-fqdn-updated",
 					Port: 443,
 				})).Times(1)
 				s.SetKubeConfigData(gomock.Any()).Times(1)

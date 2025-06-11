@@ -19,15 +19,45 @@ package webhook
 import (
 	"context"
 	"errors"
-	"net/http"
-
 	admissionv1 "k8s.io/api/admission/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"net/http"
+	"reflect"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
+
+const (
+	unsetMessage     = "field is immutable, unable to set an empty value if it was already set"
+	setMessage       = "field is immutable, unable to assign a value if it was already empty"
+	immutableMessage = "field is immutable"
+)
+
+// ValidateImmutable validates equality across two values,
+// and returns a meaningful error to indicate a changed value, a newly set value, or a newly unset value.
+func ValidateImmutable(path *field.Path, oldVal, newVal any) *field.Error {
+	if reflect.TypeOf(oldVal) != reflect.TypeOf(newVal) {
+		return field.Invalid(path, newVal, "unexpected error")
+	}
+	if !reflect.ValueOf(oldVal).IsZero() {
+		// Prevent modification if it was already set to some value
+		if reflect.ValueOf(newVal).IsZero() {
+			// unsetting the field is not allowed
+			return field.Invalid(path, newVal, unsetMessage)
+		}
+		if !reflect.DeepEqual(oldVal, newVal) {
+			// changing the field is not allowed
+			return field.Invalid(path, newVal, immutableMessage)
+		}
+	} else if !reflect.ValueOf(newVal).IsZero() {
+		return field.Invalid(path, newVal, setMessage)
+	}
+
+	return nil
+}
 
 // Validator defines functions for validating an operation.
 type Validator interface {

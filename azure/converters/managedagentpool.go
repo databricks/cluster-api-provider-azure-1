@@ -17,56 +17,70 @@ limitations under the License.
 package converters
 
 import (
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest/to"
 	"sigs.k8s.io/cluster-api-provider-azure/azure"
 )
 
 // AgentPoolToManagedClusterAgentPoolProfile converts a AgentPoolSpec to an Azure SDK ManagedClusterAgentPoolProfile used in managedcluster reconcile.
 func AgentPoolToManagedClusterAgentPoolProfile(pool azure.AgentPoolSpec) containerservice.ManagedClusterAgentPoolProfile {
-	return containerservice.ManagedClusterAgentPoolProfile{
-		Name:                &pool.Name,
-		VMSize:              &pool.SKU,
-		OsType:              containerservice.OSTypeLinux,
-		OsDiskSizeGB:        &pool.OSDiskSizeGB,
-		Count:               &pool.Replicas,
-		Type:                containerservice.AgentPoolTypeVirtualMachineScaleSets,
-		OrchestratorVersion: pool.Version,
-		VnetSubnetID:        &pool.VnetSubnetID,
-		Mode:                containerservice.AgentPoolMode(pool.Mode),
-		EnableAutoScaling:   pool.EnableAutoScaling,
-		MaxCount:            pool.MaxCount,
-		MinCount:            pool.MinCount,
-		NodeTaints:          &pool.NodeTaints,
-		AvailabilityZones:   &pool.AvailabilityZones,
-		MaxPods:             pool.MaxPods,
-		OsDiskType:          containerservice.OSDiskType(to.String(pool.OsDiskType)),
-		NodeLabels:          pool.NodeLabels,
-		EnableUltraSSD:      pool.EnableUltraSSD,
+	profile := containerservice.ManagedClusterAgentPoolProfile{
+		Name:                   &pool.Name,
+		VMSize:                 &pool.SKU,
+		OsType:                 containerservice.Linux,
+		OsDiskSizeGB:           &pool.OSDiskSizeGB,
+		Count:                  &pool.Replicas,
+		Type:                   containerservice.VirtualMachineScaleSets,
+		OrchestratorVersion:    pool.Version,
+		VnetSubnetID:           &pool.VnetSubnetID,
+		Mode:                   containerservice.AgentPoolMode(pool.Mode),
+		EnableAutoScaling:      pool.EnableAutoScaling,
+		MaxCount:               pool.MaxCount,
+		MinCount:               pool.MinCount,
+		NodeTaints:             &pool.NodeTaints,
+		AvailabilityZones:      &pool.AvailabilityZones,
+		MaxPods:                pool.MaxPods,
+		OsDiskType:             containerservice.OSDiskType(to.String(pool.OsDiskType)),
+		NodeLabels:             pool.NodeLabels,
+		EnableUltraSSD:         pool.EnableUltraSSD,
+		EnableFIPS:             pool.EnableFIPS,
+		EnableNodePublicIP:     pool.EnableNodePublicIP,
+		EnableEncryptionAtHost: pool.EnableEncryptionAtHost,
 	}
+	if pool.ScaleSetPriority != nil {
+		profile.ScaleSetPriority = containerservice.ScaleSetPriority(*pool.ScaleSetPriority)
+	}
+	return profile
 }
 
 // AgentPoolToContainerServiceAgentPool converts a AgentPoolSpec to an Azure SDK AgentPool used in agentpool reconcile.
 func AgentPoolToContainerServiceAgentPool(pool azure.AgentPoolSpec) containerservice.AgentPool {
-	return containerservice.AgentPool{
+	containerSvcAgentPool := containerservice.AgentPool{
 		ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
-			VMSize:              &pool.SKU,
-			OsType:              containerservice.OSTypeLinux,
-			OsDiskSizeGB:        &pool.OSDiskSizeGB,
-			Count:               &pool.Replicas,
-			Type:                containerservice.AgentPoolTypeVirtualMachineScaleSets,
-			OrchestratorVersion: pool.Version,
-			VnetSubnetID:        &pool.VnetSubnetID,
-			Mode:                containerservice.AgentPoolMode(pool.Mode),
-			EnableAutoScaling:   pool.EnableAutoScaling,
-			MaxCount:            pool.MaxCount,
-			MinCount:            pool.MinCount,
-			NodeTaints:          &pool.NodeTaints,
-			AvailabilityZones:   &pool.AvailabilityZones,
-			MaxPods:             pool.MaxPods,
-			OsDiskType:          containerservice.OSDiskType(to.String(pool.OsDiskType)),
-			NodeLabels:          pool.NodeLabels,
-			EnableUltraSSD:      pool.EnableUltraSSD,
+			VMSize:                 &pool.SKU,
+			OsType:                 containerservice.Linux,
+			OsDiskSizeGB:           &pool.OSDiskSizeGB,
+			Count:                  &pool.Replicas,
+			Type:                   containerservice.VirtualMachineScaleSets,
+			OrchestratorVersion:    pool.Version,
+			VnetSubnetID:           &pool.VnetSubnetID,
+			Mode:                   containerservice.AgentPoolMode(pool.Mode),
+			EnableAutoScaling:      pool.EnableAutoScaling,
+			MaxCount:               pool.MaxCount,
+			MinCount:               pool.MinCount,
+			NodeTaints:             &pool.NodeTaints,
+			AvailabilityZones:      &pool.AvailabilityZones,
+			MaxPods:                pool.MaxPods,
+			OsDiskType:             containerservice.OSDiskType(to.String(pool.OsDiskType)),
+			NodeLabels:             pool.NodeLabels,
+			EnableUltraSSD:         pool.EnableUltraSSD,
+			EnableFIPS:             pool.EnableFIPS,
+			EnableEncryptionAtHost: pool.EnableEncryptionAtHost,
+			EnableNodePublicIP:     pool.EnableNodePublicIP,
 		},
 	}
+	if pool.ScaleSetPriority != nil {
+		containerSvcAgentPool.ScaleSetPriority = containerservice.ScaleSetPriority(*pool.ScaleSetPriority)
+	}
+	return containerSvcAgentPool
 }

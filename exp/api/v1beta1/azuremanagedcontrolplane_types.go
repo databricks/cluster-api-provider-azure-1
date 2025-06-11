@@ -67,17 +67,18 @@ type AzureManagedControlPlaneSpec struct {
 	AdditionalTags infrav1.Tags `json:"additionalTags,omitempty"`
 
 	// NetworkPlugin used for building Kubernetes network.
-	// +kubebuilder:validation:Enum=azure;kubenet
+	// +kubebuilder:validation:Enum=azure;kubenet;none
 	// +optional
 	NetworkPlugin *string `json:"networkPlugin,omitempty"`
 
 	// NetworkPolicy used for building Kubernetes network.
-	// +kubebuilder:validation:Enum=azure;calico
+	// +kubebuilder:validation:Enum=azure;calico;''
 	// +optional
 	NetworkPolicy *string `json:"networkPolicy,omitempty"`
 
 	// SSHPublicKey is a string literal containing an ssh public key base64 encoded.
-	SSHPublicKey string `json:"sshPublicKey"`
+	// +optional
+	SSHPublicKey *string `json:"sshPublicKey,omitempty"`
 
 	// DNSServiceIP is an IP address assigned to the Kubernetes DNS service.
 	// It must be within the Kubernetes service address range specified in serviceCidr.
@@ -112,6 +113,27 @@ type AzureManagedControlPlaneSpec struct {
 	// APIServerAccessProfile is the access profile for AKS API server.
 	// +optional
 	APIServerAccessProfile *APIServerAccessProfile `json:"apiServerAccessProfile,omitempty"`
+
+	// AutoScalerProfile is the parameters to be applied to the cluster-autoscaler when enabled
+	// +optional
+	AutoScalerProfile *AutoScalerProfile `json:"autoScalerProfile,omitempty"`
+
+	// DisableLocalAccounts - If set to true, getting static credential will be disabled for this cluster. Expected to only be used for AAD clusters.
+	// +optional
+	DisableLocalAccounts *bool `json:"disableLocalAccounts,omitempty"`
+
+	// IPFamilies - IP families are used to determine single-stack or dual-stack clusters. For single-stack, the expected value is IPv4. For dual-stack, the expected values are IPv4 and IPv6.
+	// +optional
+	IPFamilies *[]string `json:"ipFamilies,omitempty"`
+
+	// AzureEnvironment is the name of the AzureCloud to be used.
+	// The default value that would be used by most users is "AzurePublicCloud", other values are:
+	// - ChinaCloud: "AzureChinaCloud"
+	// - PublicCloud: "AzurePublicCloud"
+	// - USGovernmentCloud: "AzureUSGovernmentCloud"
+	// +kubebuilder:default="AzurePublicCloud"
+	// +optional
+	AzureEnvironment string `json:"azureEnvironment,omitempty"`
 }
 
 // AADProfile - AAD integration managed by AKS.
@@ -199,18 +221,66 @@ type APIServerAccessProfile struct {
 	EnablePrivateClusterPublicFQDN *bool `json:"enablePrivateClusterPublicFQDN,omitempty"`
 }
 
+// AutoScalerProfile parameters to be applied to the cluster-autoscaler.
+// See also [AKS doc], [K8s doc].
+//
+// [AKS doc]: https://learn.microsoft.com/azure/aks/cluster-autoscaler#use-the-cluster-autoscaler-profile
+// [K8s doc]: https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-are-the-parameters-to-ca
+// Default values are from https://learn.microsoft.com/azure/aks/cluster-autoscaler#using-the-autoscaler-profile
+type AutoScalerProfile struct {
+	// ScaleDownDelayAfterDelete - The default is the scan-interval. Values must be an integer followed by an 's'. No unit of time other than seconds (s) is supported.
+	// +kubebuilder:validation:Pattern=`^(\d+)s$`
+	// +kubebuilder:default:="10s"
+	// +optional
+	ScaleDownDelayAfterDelete *string `json:"scaleDownDelayAfterDelete,omitempty"`
+	// ScaleDownUtilizationThreshold - The default is '0.5'.
+	// +kubebuilder:default:="0.5"
+	// +optional
+	ScaleDownUtilizationThreshold *string `json:"scaleDownUtilizationThreshold,omitempty"`
+	// SkipNodesWithSystemPods - The default is true.
+	// +kubebuilder:validation:Enum="true";"false"
+	// +kubebuilder:default:="true"
+	// +optional
+	SkipNodesWithSystemPods *SkipNodesWithSystemPods `json:"skipNodesWithSystemPods,omitempty"`
+}
+
+// SkipNodesWithSystemPods enumerates the values for SkipNodesWithSystemPods.
+type SkipNodesWithSystemPods string
+
+const (
+	// SkipNodesWithSystemPodsTrue ...
+	SkipNodesWithSystemPodsTrue SkipNodesWithSystemPods = "true"
+	// SkipNodesWithSystemPodsFalse ...
+	SkipNodesWithSystemPodsFalse SkipNodesWithSystemPods = "false"
+)
+
 // ManagedControlPlaneVirtualNetwork describes a virtual network required to provision AKS clusters.
 type ManagedControlPlaneVirtualNetwork struct {
-	Name      string `json:"name"`
-	CIDRBlock string `json:"cidrBlock"`
+	Name string `json:"name"`
+	// +deprecated: use `CIDRBlocks` instead. `CIDRBlocks` field will take precedence over `CIDRBlock` field.
+	CIDRBlock  string   `json:"cidrBlock"`
+	CIDRBlocks []string `json:"cidrBlocks"`
 	// +optional
+	// +deprecated: use `Subnets` instead.  `Subnets` field will take precedence over `Subnet` field.
 	Subnet ManagedControlPlaneSubnet `json:"subnet,omitempty"`
+	// +optional
+	Subnets []ManagedControlPlaneSubnet `json:"subnets,omitempty"`
+	// ResourceGroupName is the name of the Azure resource group of the vNet.
+	// +optional
+	ResourceGroupName *string `json:"resourceGroupName,omitempty"`
+	// SubscriptionID is the GUID of the Azure subscription in which the VNet is present. Should be used only when
+	// the VNet is BYON (Bring Your Own Network).
+	// +optional
+	// If not specified, the subscription ID of the cluster will be used.
+	SubscriptionID *string `json:"subscriptionID,omitempty"`
 }
 
 // ManagedControlPlaneSubnet describes a subnet for an AKS cluster.
 type ManagedControlPlaneSubnet struct {
-	Name      string `json:"name"`
-	CIDRBlock string `json:"cidrBlock"`
+	Name string `json:"name"`
+	// +deprecated: use `CIDRBlocks` instead.  `CIDRBlocks` field will take precedence over `CIDRBlock` field.
+	CIDRBlock  string   `json:"cidrBlock"`
+	CIDRBlocks []string `json:"cidrBlocks"`
 }
 
 // AzureManagedControlPlaneStatus defines the observed state of AzureManagedControlPlane.
