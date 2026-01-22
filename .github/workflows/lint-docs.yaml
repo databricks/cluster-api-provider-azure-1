@@ -10,7 +10,9 @@ on:
 jobs:
   markdown-link-check:
     name: Broken Links
-    runs-on: ubuntu-latest
+    runs-on: 
+      group: ubuntu-runners
+      labels: ubuntu-20.04-16core
     steps:
     - uses: actions/checkout@master
     - uses: gaurav-nelson/github-action-markdown-link-check@v1

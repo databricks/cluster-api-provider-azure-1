@@ -34,6 +34,14 @@ const (
 	// owner: @alexeldeib
 	// alpha: v0.4
 	AKS featuregate.Feature = "AKS"
+
+	// Kubelogin is the feature gate for converting kube config data to non-interactive mode using kubelogin.
+	// owner: @karthikbalasub
+	// alpha: v1.3
+	Kubelogin featuregate.Feature = "Kubelogin"
+
+	// AksUsePerSubscriptionRateLimiter is used to enable the per-subscription bucket rate limiter for AKS controllers.
+	AksUsePerSubscriptionRateLimiter featuregate.Feature = "AksUsePerSubscriptionRateLimiter"
 )
 
 func init() {
@@ -44,5 +52,7 @@ func init() {
 // To add a new feature, define a key for it above and add it here.
 var defaultCAPZFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	// Every feature should be initiated here:
-	AKS: {Default: false, PreRelease: featuregate.Alpha},
+	AKS:                              {Default: false, PreRelease: featuregate.Alpha},
+	Kubelogin:                        {Default: false, PreRelease: featuregate.Alpha},
+	AksUsePerSubscriptionRateLimiter: {Default: false, PreRelease: featuregate.Alpha},
 }

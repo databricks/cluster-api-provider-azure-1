@@ -25,6 +25,9 @@ import (
 	"os"
 	"time"
 
+	ratelimiterutil "sigs.k8s.io/cluster-api-provider-azure/util/ratelimiter"
+	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
+
 	// +kubebuilder:scaffold:imports
 	aadpodv1 "github.com/Azure/aad-pod-identity/pkg/apis/aadpodidentity/v1"
 	"github.com/spf13/pflag"
@@ -115,6 +118,15 @@ var (
 	webhookPort                        int
 	reconcileTimeout                   time.Duration
 	enableTracing                      bool
+	periodicReconcileDuration          time.Duration
+	amcReconcileWhitelist              string
+	amcpReconcileWhitelist             string
+	ammpReconcileWhitelist             string
+	amcReconcileBlacklist              string
+	amcpReconcileBlacklist             string
+	ammpReconcileBlacklist             string
+	disableSubnetReconcile             bool
+	disableVnetReconcile               bool
 )
 
 // InitFlags initializes all command-line flags.
@@ -239,6 +251,63 @@ func InitFlags(fs *pflag.FlagSet) {
 		"enable-tracing",
 		false,
 		"Enable tracing to the opentelemetry-collector service in the same namespace.",
+	)
+
+	fs.DurationVar(
+		&periodicReconcileDuration,
+		"periodic-reconcile-duration",
+		30*time.Minute,
+		"Duration between periodic reconciliations",
+	)
+
+	fs.StringVar(&amcReconcileWhitelist,
+		"amc-reconcile-whitelist",
+		"",
+		"Comma-separated list of AMC CRs to reconcile. If not set, the operator will reconcile all AMC CRs.",
+	)
+
+	fs.StringVar(&amcpReconcileWhitelist,
+		"amcp-reconcile-whitelist",
+		"",
+		"Comma-separated list of AMCP CRs to reconcile. If not set, the operator will reconcile all AMCP CRs.",
+	)
+
+	fs.StringVar(&ammpReconcileWhitelist,
+		"ammp-reconcile-whitelist",
+		"",
+		"Comma-separated list of AMMP CRs to reconcile. If not set, the operator will reconcile all AMMP CRs.",
+	)
+
+	fs.StringVar(&amcReconcileBlacklist,
+		"amc-reconcile-blacklist",
+		"",
+		"Comma-separated list of AMC CRs to skip reconciliation. If not set, no AMC CRs will be skipped.",
+	)
+
+	fs.StringVar(&amcpReconcileBlacklist,
+		"amcp-reconcile-blacklist",
+		"",
+		"Comma-separated list of AMCP CRs to skip reconciliation. If not set, no AMCP CRs will be skipped.",
+	)
+
+	fs.StringVar(&ammpReconcileBlacklist,
+		"ammp-reconcile-blacklist",
+		"",
+		"Comma-separated list of AMMP CRs to skip reconciliation. If not set, no AMMP CRs will be skipped.",
+	)
+
+	fs.BoolVar(
+		&disableSubnetReconcile,
+		"disable-subnet-reconcile",
+		true,
+		"Disable reconciliation of subnets.",
+	)
+
+	fs.BoolVar(
+		&disableVnetReconcile,
+		"disable-vnet-reconcile",
+		true,
+		"Disable reconciliation of vnets.",
 	)
 
 	feature.MutableGates.AddFlag(fs)
@@ -391,6 +460,7 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("azuremachinepool-reconciler"),
 			reconcileTimeout,
+			periodicReconcileDuration,
 			watchFilterValue,
 		).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency}, Cache: mpCache}); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AzureMachinePool")
@@ -423,6 +493,10 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 		}
 
 		if feature.Gates.Enabled(feature.AKS) {
+			var machinePoolRateLimiter ratelimiter.RateLimiter
+			if feature.Gates.Enabled(feature.AksUsePerSubscriptionRateLimiter) {
+				machinePoolRateLimiter = ratelimiterutil.PerAccountBucketRateLimiter(mgr.GetClient(), setupLog, ratelimiterutil.GetGroupKeyFromManagedMachinePool)
+			}
 			mmpmCache, err := coalescing.NewRequestCache(debouncingTimer)
 			if err != nil {
 				setupLog.Error(err, "failed to build mmpmCache ReconcileCache")
@@ -433,7 +507,9 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 				mgr.GetEventRecorderFor("azuremanagedmachinepoolmachine-reconciler"),
 				reconcileTimeout,
 				watchFilterValue,
-			).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency}, Cache: mmpmCache}); err != nil {
+				ammpReconcileWhitelist,
+				ammpReconcileBlacklist,
+			).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureMachinePoolConcurrency, RateLimiter: machinePoolRateLimiter}, Cache: mmpmCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedMachinePool")
 				os.Exit(1)
 			}
@@ -443,12 +519,20 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 				setupLog.Error(err, "failed to build mcCache ReconcileCache")
 			}
 
+			// Managed Cluster and ControlPlane use the same name, so we can use the same ratelimiter that fetches
+			// subscription id from controlplane.
+			var managedClusterRateLimiter ratelimiter.RateLimiter
+			if feature.Gates.Enabled(feature.AksUsePerSubscriptionRateLimiter) {
+				managedClusterRateLimiter = ratelimiterutil.PerAccountBucketRateLimiter(mgr.GetClient(), setupLog, ratelimiterutil.GetGroupKeyFromControlPlane)
+			}
 			if err := (&infrav1controllersexp.AzureManagedClusterReconciler{
-				Client:           mgr.GetClient(),
-				Recorder:         mgr.GetEventRecorderFor("azuremanagedcluster-reconciler"),
-				ReconcileTimeout: reconcileTimeout,
-				WatchFilterValue: watchFilterValue,
-			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency}, Cache: mcCache}); err != nil {
+				Client:                mgr.GetClient(),
+				Recorder:              mgr.GetEventRecorderFor("azuremanagedcluster-reconciler"),
+				ReconcileTimeout:      reconcileTimeout,
+				WatchFilterValue:      watchFilterValue,
+				AmcReconcileWhitelist: amcReconcileWhitelist,
+				AmcReconcileBlacklist: amcReconcileBlacklist,
+			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency, RateLimiter: managedClusterRateLimiter}, Cache: mcCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedCluster")
 				os.Exit(1)
 			}
@@ -459,11 +543,15 @@ func registerControllers(ctx context.Context, mgr manager.Manager) {
 			}
 
 			if err := (&infrav1controllersexp.AzureManagedControlPlaneReconciler{
-				Client:           mgr.GetClient(),
-				Recorder:         mgr.GetEventRecorderFor("azuremanagedcontrolplane-reconciler"),
-				ReconcileTimeout: reconcileTimeout,
-				WatchFilterValue: watchFilterValue,
-			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency}, Cache: mcpCache}); err != nil {
+				Client:                 mgr.GetClient(),
+				Recorder:               mgr.GetEventRecorderFor("azuremanagedcontrolplane-reconciler"),
+				ReconcileTimeout:       reconcileTimeout,
+				WatchFilterValue:       watchFilterValue,
+				AmcpReconcileWhitelist: amcpReconcileWhitelist,
+				AmcpReconcileBlacklist: amcpReconcileBlacklist,
+				DisableSubnetReconcile: disableSubnetReconcile,
+				DisableVnetReconcile:   disableVnetReconcile,
+			}).SetupWithManager(ctx, mgr, controllers.Options{Options: controller.Options{MaxConcurrentReconciles: azureClusterConcurrency, RateLimiter: managedClusterRateLimiter}, Cache: mcpCache}); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "AzureManagedControlPlane")
 				os.Exit(1)
 			}

@@ -21,7 +21,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	infrav1 "sigs.k8s.io/cluster-api-provider-azure/api/v1alpha4"
+	infrav1exp "sigs.k8s.io/cluster-api-provider-azure/exp/api/v1beta1"
+	"sigs.k8s.io/cluster-api-provider-azure/pkg/record"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/util/conditions"
+
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
+	azureautorest "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	infrav1alpha4 "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
@@ -36,7 +43,9 @@ const serviceName = "agentpools"
 // ManagedMachinePoolScope defines the scope interface for a managed machine pool.
 type ManagedMachinePoolScope interface {
 	azure.ClusterDescriber
+	azure.AsyncStatusUpdater
 
+	IsNotPaused() bool
 	NodeResourceGroup() string
 	AgentPoolAnnotations() map[string]string
 	AgentPoolSpec() azure.AgentPoolSpec
@@ -47,15 +56,17 @@ type ManagedMachinePoolScope interface {
 
 // Service provides operations on Azure resources.
 type Service struct {
-	scope ManagedMachinePoolScope
+	scope            ManagedMachinePoolScope
+	infraMachinePool *infrav1exp.AzureManagedMachinePool
 	Client
 }
 
 // New creates a new service.
-func New(scope ManagedMachinePoolScope) *Service {
+func New(scope ManagedMachinePoolScope, infraMachinePool *infrav1exp.AzureManagedMachinePool) *Service {
 	return &Service{
-		scope:  scope,
-		Client: NewClient(scope),
+		scope:            scope,
+		infraMachinePool: infraMachinePool,
+		Client:           NewClient(scope),
 	}
 }
 
@@ -75,8 +86,15 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	agentPoolSpec := s.scope.AgentPoolSpec()
 	profile := converters.AgentPoolToContainerServiceAgentPool(agentPoolSpec)
 
+	if agentPoolSpec.KubeletConfig != nil {
+		profile.KubeletConfig = (*containerservice.KubeletConfig)(agentPoolSpec.KubeletConfig)
+	}
+
+	profile.Tags = agentPoolSpec.AdditionalTags
+
 	existingPool, err := s.Client.Get(ctx, agentPoolSpec.ResourceGroup, agentPoolSpec.Cluster, agentPoolSpec.Name)
 	if err != nil && !azure.ResourceNotFound(err) {
+		s.scope.UpdatePutStatus(clusterv1.ReadyCondition, serviceName, err)
 		return errors.Wrap(err, "failed to get existing agent pool")
 	}
 
@@ -84,14 +102,22 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	// cluster, normalized to reflect the input we originally provided.
 	// AKS will populate defaults and read-only values, which we want
 	// to strip/clean to match what we expect.
+	updateRequired := false
 
 	customHeaders := maps.FilterByKeyPrefix(s.scope.AgentPoolAnnotations(), azure.CustomHeaderPrefix)
 	if isCreate := azure.ResourceNotFound(err); isCreate {
 		err = s.Client.CreateOrUpdate(ctx, agentPoolSpec.ResourceGroup, agentPoolSpec.Cluster, agentPoolSpec.Name,
 			profile, customHeaders)
+		s.scope.UpdatePutStatus(clusterv1.ReadyCondition, serviceName, err)
 		if err != nil && azure.ResourceNotFound(err) {
 			return azure.WithTransientError(errors.Wrap(err, "agent pool dependent resource does not exist yet"), 20*time.Second)
 		} else if err != nil {
+			switch err := errors.Cause(err).(type) {
+			case *azureautorest.ServiceError:
+				conditions.MarkFalse(s.infraMachinePool, clusterv1.ReadyCondition, err.Code, clusterv1.ConditionSeverityError, err.Message)
+			default:
+				conditions.MarkFalse(s.infraMachinePool, clusterv1.ReadyCondition, infrav1.FailedReason, clusterv1.ConditionSeverityError, err.Error())
+			}
 			return errors.Wrap(err, "failed to create or update agent pool")
 		}
 	} else {
@@ -99,47 +125,105 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if ps != string(infrav1alpha4.Canceled) && ps != string(infrav1alpha4.Failed) && ps != string(infrav1alpha4.Succeeded) {
 			msg := fmt.Sprintf("Unable to update existing agent pool in non terminal state. Agent pool must be in one of the following provisioning states: canceled, failed, or succeeded. Actual state: %s", ps)
 			log.V(2).Info(msg)
-			return azure.WithTransientError(errors.New(msg), 20*time.Second)
+			retErr := azure.WithTransientError(errors.New(msg), 20*time.Second)
+			s.scope.UpdatePatchStatus(clusterv1.ReadyCondition, serviceName, retErr)
+			return retErr
+		}
+
+		// When tags are removed, the change will be ignored if only set to nil.
+		if existingPool.Tags != nil && len(existingPool.Tags) > 0 && profile.Tags == nil {
+			profile.Tags = map[string]*string{}
+			log.V(2).Info("Remove additional tags from agent pool")
 		}
 
 		// Normalize individual agent pools to diff in case we need to update
 		existingProfile := containerservice.AgentPool{
 			ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
-				Count:               existingPool.Count,
-				OrchestratorVersion: existingPool.OrchestratorVersion,
-				Mode:                existingPool.Mode,
-				EnableAutoScaling:   existingPool.EnableAutoScaling,
-				MinCount:            existingPool.MinCount,
-				MaxCount:            existingPool.MaxCount,
+				Count:    existingPool.Count,
+				MinCount: existingPool.MinCount,
+				MaxCount: existingPool.MaxCount,
 			},
 		}
 
 		normalizedProfile := containerservice.AgentPool{
 			ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
-				Count:               profile.Count,
-				OrchestratorVersion: profile.OrchestratorVersion,
-				Mode:                profile.Mode,
-				EnableAutoScaling:   profile.EnableAutoScaling,
-				MinCount:            profile.MinCount,
-				MaxCount:            profile.MaxCount,
+				Count:    profile.Count,
+				MinCount: profile.MinCount,
+				MaxCount: profile.MaxCount,
 			},
 		}
+
+		if s.scope.IsNotPaused() {
+			existingProfile.OrchestratorVersion = existingPool.OrchestratorVersion
+			normalizedProfile.OrchestratorVersion = profile.OrchestratorVersion
+
+			existingProfile.Mode = existingPool.Mode
+			normalizedProfile.Mode = profile.Mode
+
+			existingProfile.EnableAutoScaling = existingPool.EnableAutoScaling
+			normalizedProfile.EnableAutoScaling = profile.EnableAutoScaling
+
+			existingProfile.NodeLabels = existingPool.NodeLabels
+			normalizedProfile.NodeLabels = profile.NodeLabels
+
+			existingProfile.Tags = existingPool.Tags
+			normalizedProfile.Tags = profile.Tags
+		}
+
+		normalizeFieldsSafeForUpdateDuringStagedRollout(profile, existingPool, &existingProfile, &normalizedProfile)
 
 		// Diff and check if we require an update
 		diff := cmp.Diff(normalizedProfile, existingProfile)
 		if diff != "" {
-			log.V(2).Info(fmt.Sprintf("Update required (+new -old):\n%s", diff))
-			err = s.Client.CreateOrUpdate(ctx, agentPoolSpec.ResourceGroup, agentPoolSpec.Cluster, agentPoolSpec.Name,
-				profile, customHeaders)
-			if err != nil {
-				return errors.Wrap(err, "failed to create or update agent pool")
-			}
-		} else {
-			log.V(2).Info("Normalized and desired agent pool matched, no update needed")
+			msg := fmt.Sprintf("Node pool %s (ID: %s) needs update, diff: %s", *existingPool.Name, *existingPool.ID, diff)
+			log.V(2).Info(msg)
+			updateRequired = true
 		}
 	}
 
+	// NOTE: We do not check for `isPaused` here because new pools could be created during staged update and
+	// need to be recreated if they are in a FAILED state
+	if existingPool.ManagedClusterAgentPoolProfileProperties != nil &&
+		existingPool.ManagedClusterAgentPoolProfileProperties.ProvisioningState != nil &&
+		*existingPool.ManagedClusterAgentPoolProfileProperties.ProvisioningState == string(infrav1alpha4.Failed) {
+		readyCondition := conditions.Get(s.infraMachinePool, clusterv1.ReadyCondition)
+		// TODO: Do not update for certain readyCondition.Reason values
+		if readyCondition != nil {
+			msg := fmt.Sprintf("Node pool %s (ID: %s) is in failed state, triggering an update", *existingPool.Name, *existingPool.ID)
+			log.V(2).Info(msg)
+			record.Eventf(s.infraMachinePool, "NodePoolFailed", msg)
+			updateRequired = true
+		}
+	}
+
+	if updateRequired {
+		log.V(2).Info(fmt.Sprintf("Updating node pool %s (ID: %s)", *existingPool.Name, *existingPool.ID))
+		err = s.Client.CreateOrUpdate(ctx, agentPoolSpec.ResourceGroup, agentPoolSpec.Cluster, agentPoolSpec.Name,
+			profile, customHeaders)
+		s.scope.UpdatePatchStatus(clusterv1.ReadyCondition, serviceName, err)
+		if err != nil {
+			switch err := errors.Cause(err).(type) {
+			case *azureautorest.ServiceError:
+				conditions.MarkFalse(s.infraMachinePool, clusterv1.ReadyCondition, err.Code, clusterv1.ConditionSeverityError, err.Message)
+			default:
+				conditions.MarkFalse(s.infraMachinePool, clusterv1.ReadyCondition, infrav1.FailedReason, clusterv1.ConditionSeverityError, err.Error())
+			}
+			return errors.Wrap(err, "failed to create or update agent pool")
+		}
+	} else {
+		s.scope.UpdatePatchStatus(clusterv1.ReadyCondition, serviceName, nil)
+	}
+
 	return nil
+}
+
+func normalizeFieldsSafeForUpdateDuringStagedRollout(profile containerservice.AgentPool, existingPool containerservice.AgentPool, existingProfile *containerservice.AgentPool, normalizedProfile *containerservice.AgentPool) {
+	// CAUTION: Only updates that are safe to do during staged rollout can go here
+
+	// Auto scaler enabled, no need to reconcile on node pool count
+	if profile.MinCount != nil && profile.MaxCount != nil {
+		normalizedProfile.Count = existingPool.Count
+	}
 }
 
 // Delete deletes the virtual network with the provided name.
@@ -154,6 +238,7 @@ func (s *Service) Delete(ctx context.Context) error {
 
 	log.V(2).Info(fmt.Sprintf("deleting agent pool  %s ", agentPoolSpec.Name))
 	err := s.Client.Delete(ctx, agentPoolSpec.ResourceGroup, agentPoolSpec.Cluster, agentPoolSpec.Name)
+	s.scope.UpdateDeleteStatus(clusterv1.ReadyCondition, serviceName, err)
 	if err != nil {
 		if azure.ResourceNotFound(err) {
 			// already deleted

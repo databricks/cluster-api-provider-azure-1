@@ -201,14 +201,14 @@ type ManagedClusterSpec struct {
 	// LoadBalancerSKU for the managed cluster. Possible values include: 'Standard', 'Basic'. Defaults to Standard.
 	LoadBalancerSKU string
 
-	// NetworkPlugin used for building Kubernetes network. Possible values include: 'azure', 'kubenet'. Defaults to azure.
+	// NetworkPlugin used for building Kubernetes network. Possible values include: 'azure', 'kubenet', 'none'. Defaults to azure.
 	NetworkPlugin string
 
-	// NetworkPolicy used for building Kubernetes network. Possible values include: 'calico', 'azure'. Defaults to azure.
+	// NetworkPolicy used for building Kubernetes network. Possible values include: 'calico', 'azure', ''. Defaults to azure.
 	NetworkPolicy string
 
 	// SSHPublicKey is a string literal containing an ssh public key. Will autogenerate and discard if not provided.
-	SSHPublicKey string
+	SSHPublicKey *string
 
 	// AgentPools is the list of agent pool specifications in this cluster.
 	AgentPools []AgentPoolSpec
@@ -236,6 +236,15 @@ type ManagedClusterSpec struct {
 
 	// APIServerAccessProfile is the access profile for AKS API server.
 	APIServerAccessProfile *APIServerAccessProfile
+
+	// AutoScalerProfile is the parameters to be applied to the cluster-autoscaler when enabled.
+	AutoScalerProfile *AutoScalerProfile
+
+	// DisableLocalAccounts - If set to true, getting static credential will be disabled for this cluster. Expected to only be used for AAD clusters.
+	DisableLocalAccounts *bool
+
+	// IPFamilies - IP families are used to determine single-stack or dual-stack clusters. For single-stack, the expected value is IPv4. For dual-stack, the expected values are IPv4 and IPv6.
+	IPFamilies *[]string
 }
 
 // AADProfile is Azure Active Directory configuration to integrate with AKS, for aad authentication.
@@ -298,6 +307,16 @@ type APIServerAccessProfile struct {
 	EnablePrivateClusterPublicFQDN *bool
 }
 
+// AutoScalerProfile parameters to be applied to the cluster-autoscaler when enabled.
+type AutoScalerProfile struct {
+	// ScaleDownDelayAfterDelete - The default is the scan-interval. Values must be an integer followed by an 'm'. No unit of time other than minutes (m) is supported.
+	ScaleDownDelayAfterDelete *string
+	// ScaleDownUtilizationThreshold - The default is '0.5'.
+	ScaleDownUtilizationThreshold *string
+	// SkipNodesWithSystemPods - The default is true.
+	SkipNodesWithSystemPods *string
+}
+
 // AgentPoolSpec contains agent pool specification details.
 type AgentPoolSpec struct {
 	// Name is the name of agent pool.
@@ -318,11 +337,31 @@ type AgentPoolSpec struct {
 	// Replicas is the number of desired machines.
 	Replicas int32
 
+	// Enable FIPS node image
+	EnableFIPS *bool `json:"EnableFIPS,omitempty"`
+
+	// Enable host based OS and data drive encryption
+	EnableEncryptionAtHost *bool `json:"EnableEncryptionAtHost,omitempty"`
+
+	// Enable node public IP
+	EnableNodePublicIP *bool `json:"EnableNodePublicIP,omitempty"`
+
 	// OSDiskSizeGB is the OS disk size in GB for every machine in this agent pool.
 	OSDiskSizeGB int32
 
 	// VnetSubnetID is the Azure Resource ID for the subnet which should contain nodes.
 	VnetSubnetID string
+
+	// ScaleSetPriority - ScaleSetPriority to be used to specify virtual machine scale set priority. Default to regular. Possible values include: 'Spot', 'Regular'
+	// +optional
+	ScaleSetPriority *string `json:"scaleSetPriority,omitempty"`
+
+	// KubeletConfig - KubeletConfig specifies the configuration of kubelet on agent nodes.
+	// +optional
+	KubeletConfig *infrav1.KubeletConfig `json:"kubeletConfig,omitempty"`
+
+	// +optional
+	AdditionalTags map[string]*string `json:"additionalTags,omitempty"`
 
 	// Mode represents mode of an agent pool. Possible values include: 'System', 'User'.
 	Mode string

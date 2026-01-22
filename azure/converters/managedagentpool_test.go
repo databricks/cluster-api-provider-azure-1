@@ -19,7 +19,7 @@ package converters
 import (
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2021-05-01/containerservice"
+	"github.com/Azure/azure-sdk-for-go/services/containerservice/mgmt/2022-07-01/containerservice"
 	"github.com/Azure/go-autorest/autorest/to"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/cluster-api-provider-azure/azure"
@@ -46,34 +46,38 @@ func Test_AgentPoolToManagedClusterAgentPoolProfile(t *testing.T) {
 				NodeTaints:        []string{"key1=value1:NoSchedule"},
 				AvailabilityZones: []string{"zone1"},
 				MaxPods:           to.Int32Ptr(60),
-				OsDiskType:        to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:        to.StringPtr(string(containerservice.Managed)),
 				NodeLabels: map[string]*string{
 					"custom": to.StringPtr("default"),
 				},
-				Name: "agentpool1",
+				Name:                   "agentpool1",
+				ScaleSetPriority:       to.StringPtr("Spot"),
+				EnableEncryptionAtHost: to.BoolPtr(true),
 			},
 
 			expect: func(g *GomegaWithT, result containerservice.ManagedClusterAgentPoolProfile) {
 				g.Expect(result).To(Equal(containerservice.ManagedClusterAgentPoolProfile{
 					Name:                to.StringPtr("agentpool1"),
 					VMSize:              to.StringPtr("Standard_D2s_v3"),
-					OsType:              containerservice.OSTypeLinux,
+					OsType:              containerservice.Linux,
 					OsDiskSizeGB:        to.Int32Ptr(100),
 					Count:               to.Int32Ptr(2),
-					Type:                containerservice.AgentPoolTypeVirtualMachineScaleSets,
+					Type:                containerservice.VirtualMachineScaleSets,
 					OrchestratorVersion: to.StringPtr("1.22.6"),
 					VnetSubnetID:        to.StringPtr("/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-123/providers/Microsoft.Network/virtualNetworks/vnet-123/subnets/subnet-123"),
-					Mode:                containerservice.AgentPoolModeUser,
+					Mode:                containerservice.User,
 					EnableAutoScaling:   to.BoolPtr(true),
 					MaxCount:            to.Int32Ptr(5),
 					MinCount:            to.Int32Ptr(2),
 					NodeTaints:          to.StringSlicePtr([]string{"key1=value1:NoSchedule"}),
 					AvailabilityZones:   to.StringSlicePtr([]string{"zone1"}),
 					MaxPods:             to.Int32Ptr(60),
-					OsDiskType:          containerservice.OSDiskTypeManaged,
+					OsDiskType:          containerservice.Managed,
 					NodeLabels: map[string]*string{
 						"custom": to.StringPtr("default"),
 					},
+					ScaleSetPriority:       containerservice.Spot,
+					EnableEncryptionAtHost: to.BoolPtr(true),
 				}))
 			},
 		},
@@ -112,33 +116,35 @@ func Test_AgentPoolToAgentPoolToContainerServiceAgentPool(t *testing.T) {
 				NodeTaints:        []string{"key1=value1:NoSchedule"},
 				AvailabilityZones: []string{"zone1"},
 				MaxPods:           to.Int32Ptr(60),
-				OsDiskType:        to.StringPtr(string(containerservice.OSDiskTypeManaged)),
+				OsDiskType:        to.StringPtr(string(containerservice.Managed)),
 				NodeLabels: map[string]*string{
 					"custom": to.StringPtr("default"),
 				},
+				EnableEncryptionAtHost: to.BoolPtr(true),
 			},
 
 			expect: func(g *GomegaWithT, result containerservice.AgentPool) {
 				g.Expect(result).To(Equal(containerservice.AgentPool{
 					ManagedClusterAgentPoolProfileProperties: &containerservice.ManagedClusterAgentPoolProfileProperties{
 						VMSize:              to.StringPtr("Standard_D2s_v3"),
-						OsType:              containerservice.OSTypeLinux,
+						OsType:              containerservice.Linux,
 						OsDiskSizeGB:        to.Int32Ptr(100),
 						Count:               to.Int32Ptr(2),
-						Type:                containerservice.AgentPoolTypeVirtualMachineScaleSets,
+						Type:                containerservice.VirtualMachineScaleSets,
 						OrchestratorVersion: to.StringPtr("1.22.6"),
 						VnetSubnetID:        to.StringPtr("/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-123/providers/Microsoft.Network/virtualNetworks/vnet-123/subnets/subnet-123"),
-						Mode:                containerservice.AgentPoolModeUser,
+						Mode:                containerservice.User,
 						EnableAutoScaling:   to.BoolPtr(true),
 						MaxCount:            to.Int32Ptr(5),
 						MinCount:            to.Int32Ptr(2),
 						NodeTaints:          to.StringSlicePtr([]string{"key1=value1:NoSchedule"}),
 						AvailabilityZones:   to.StringSlicePtr([]string{"zone1"}),
 						MaxPods:             to.Int32Ptr(60),
-						OsDiskType:          containerservice.OSDiskTypeManaged,
+						OsDiskType:          containerservice.Managed,
 						NodeLabels: map[string]*string{
 							"custom": to.StringPtr("default"),
 						},
+						EnableEncryptionAtHost: to.BoolPtr(true),
 					},
 				}))
 			},

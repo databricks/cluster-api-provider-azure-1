@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"sigs.k8s.io/cluster-api-provider-azure/pkg/ratelimit"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -44,9 +46,11 @@ import (
 // AzureManagedClusterReconciler reconciles an AzureManagedCluster object.
 type AzureManagedClusterReconciler struct {
 	client.Client
-	Recorder         record.EventRecorder
-	ReconcileTimeout time.Duration
-	WatchFilterValue string
+	Recorder              record.EventRecorder
+	ReconcileTimeout      time.Duration
+	WatchFilterValue      string
+	AmcReconcileWhitelist string
+	AmcReconcileBlacklist string
 }
 
 // SetupWithManager initializes this controller with a manager.
@@ -86,7 +90,7 @@ func (amcr *AzureManagedClusterReconciler) SetupWithManager(ctx context.Context,
 	// Add a watch on clusterv1.Cluster object for unpause notifications.
 	if err = c.Watch(
 		&source.Kind{Type: &clusterv1.Cluster{}},
-		handler.EnqueueRequestsFromMapFunc(util.ClusterToInfrastructureMapFunc(infrav1exp.GroupVersion.WithKind("AzureManagedCluster"))),
+		ratelimit.EnqueueRequestsFromMapFunc(util.ClusterToInfrastructureMapFunc(infrav1exp.GroupVersion.WithKind("AzureManagedCluster"))),
 		predicates.ClusterUnpaused(log),
 		predicates.ResourceNotPausedAndHasFilterLabel(log, amcr.WatchFilterValue),
 	); err != nil {
@@ -102,6 +106,29 @@ func (amcr *AzureManagedClusterReconciler) SetupWithManager(ctx context.Context,
 
 // Reconcile idempotently gets, creates, and updates a managed cluster.
 func (amcr *AzureManagedClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
+	if amcr.AmcReconcileWhitelist != "" {
+		whitelistedCrs := strings.Split(amcr.AmcReconcileWhitelist, ",")
+		isWhitelisted := false
+		for _, cr := range whitelistedCrs {
+			if cr == req.Name {
+				isWhitelisted = true
+				break
+			}
+		}
+		if !isWhitelisted {
+			return ctrl.Result{}, nil
+		}
+	}
+
+	if amcr.AmcReconcileBlacklist != "" {
+		blacklistedCrs := strings.Split(amcr.AmcReconcileBlacklist, ",")
+		for _, cr := range blacklistedCrs {
+			if cr == req.Name {
+				return ctrl.Result{}, nil
+			}
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, reconciler.DefaultedLoopTimeout(amcr.ReconcileTimeout))
 	defer cancel()
 

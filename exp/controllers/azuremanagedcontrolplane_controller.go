@@ -19,6 +19,8 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sigs.k8s.io/cluster-api-provider-azure/pkg/ratelimit"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -49,9 +51,13 @@ import (
 // AzureManagedControlPlaneReconciler reconciles an AzureManagedControlPlane object.
 type AzureManagedControlPlaneReconciler struct {
 	client.Client
-	Recorder         record.EventRecorder
-	ReconcileTimeout time.Duration
-	WatchFilterValue string
+	Recorder               record.EventRecorder
+	ReconcileTimeout       time.Duration
+	WatchFilterValue       string
+	AmcpReconcileWhitelist string
+	AmcpReconcileBlacklist string
+	DisableSubnetReconcile bool
+	DisableVnetReconcile   bool
 }
 
 // SetupWithManager initializes this controller with a manager.
@@ -77,6 +83,9 @@ func (amcpr *AzureManagedControlPlaneReconciler) SetupWithManager(ctx context.Co
 	// map requests for machine pools corresponding to AzureManagedControlPlane's defaultPool back to the corresponding AzureManagedControlPlane.
 	azureManagedMachinePoolMapper := MachinePoolToAzureManagedControlPlaneMapFunc(ctx, amcpr.Client, infrav1exp.GroupVersion.WithKind("AzureManagedControlPlane"), log)
 
+	// map requests for Cluster corresponding to AzureManagedControlPlane back to the corresponding AzureManagedControlPlane.
+	clusterMapper := ClusterToAzureManagedControlPlaneMapper(log)
+
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		WithOptions(options.Options).
 		For(azManagedControlPlane).
@@ -84,12 +93,17 @@ func (amcpr *AzureManagedControlPlaneReconciler) SetupWithManager(ctx context.Co
 		// watch AzureManagedCluster resources
 		Watches(
 			&source.Kind{Type: &infrav1exp.AzureManagedCluster{}},
-			handler.EnqueueRequestsFromMapFunc(azureManagedClusterMapper),
+			ratelimit.EnqueueRequestsFromMapFunc(azureManagedClusterMapper),
 		).
 		// watch MachinePool resources
 		Watches(
 			&source.Kind{Type: &clusterv1exp.MachinePool{}},
-			handler.EnqueueRequestsFromMapFunc(azureManagedMachinePoolMapper),
+			ratelimit.EnqueueRequestsFromMapFunc(azureManagedMachinePoolMapper),
+		).
+		// Add a watch on clusterv1.Cluster object for unpause notifications.
+		Watches(
+			&source.Kind{Type: &clusterv1.Cluster{}},
+			ratelimit.EnqueueRequestsFromMapFunc(clusterMapper),
 		).
 		Build(r)
 	if err != nil {
@@ -115,6 +129,29 @@ func (amcpr *AzureManagedControlPlaneReconciler) SetupWithManager(ctx context.Co
 
 // Reconcile idempotently gets, creates, and updates a managed control plane.
 func (amcpr *AzureManagedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
+	if amcpr.AmcpReconcileWhitelist != "" {
+		whitelistedCrs := strings.Split(amcpr.AmcpReconcileWhitelist, ",")
+		isWhitelisted := false
+		for _, cr := range whitelistedCrs {
+			if cr == req.Name {
+				isWhitelisted = true
+				break
+			}
+		}
+		if !isWhitelisted {
+			return ctrl.Result{}, nil
+		}
+	}
+
+	if amcpr.AmcpReconcileBlacklist != "" {
+		blacklistedCrs := strings.Split(amcpr.AmcpReconcileBlacklist, ",")
+		for _, cr := range blacklistedCrs {
+			if cr == req.Name {
+				return ctrl.Result{}, nil
+			}
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, reconciler.DefaultedLoopTimeout(amcpr.ReconcileTimeout))
 	defer cancel()
 
@@ -147,8 +184,8 @@ func (amcpr *AzureManagedControlPlaneReconciler) Reconcile(ctx context.Context, 
 
 	log = log.WithValues("cluster", cluster.Name)
 
-	// Return early if the object or Cluster is paused.
-	if annotations.IsPaused(cluster, azureControlPlane) {
+	// Only return early if it's paused with the manual pause annotation. Do not return early if it's paused due to staged update
+	if annotations.IsPaused(cluster, azureControlPlane) && cluster.ObjectMeta.Annotations != nil && cluster.ObjectMeta.Annotations[infrav1exp.AnnotationPaused] == "true" {
 		log.Info("AzureManagedControlPlane or linked Cluster is marked as paused. Won't reconcile")
 		return ctrl.Result{}, nil
 	}
@@ -172,10 +209,12 @@ func (amcpr *AzureManagedControlPlaneReconciler) Reconcile(ctx context.Context, 
 
 	// Create the scope.
 	mcpScope, err := scope.NewManagedControlPlaneScope(ctx, scope.ManagedControlPlaneScopeParams{
-		Client:       amcpr.Client,
-		Cluster:      cluster,
-		ControlPlane: azureControlPlane,
-		PatchTarget:  azureControlPlane,
+		Client:                 amcpr.Client,
+		Cluster:                cluster,
+		ControlPlane:           azureControlPlane,
+		PatchTarget:            azureControlPlane,
+		DisableSubnetReconcile: amcpr.DisableSubnetReconcile,
+		DisableVnetReconcile:   amcpr.DisableVnetReconcile,
 	})
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "failed to create scope")

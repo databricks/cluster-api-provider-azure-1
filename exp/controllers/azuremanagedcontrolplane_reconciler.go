@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"k8s.io/klog/v2"
 
 	"github.com/pkg/errors"
 	"sigs.k8s.io/cluster-api-provider-azure/azure"
@@ -42,16 +43,20 @@ type azureManagedControlPlaneService struct {
 
 // newAzureManagedControlPlaneReconciler populates all the services based on input scope.
 func newAzureManagedControlPlaneReconciler(scope *scope.ManagedControlPlaneScope) *azureManagedControlPlaneService {
+	services := []azure.ServiceReconciler{
+		groups.New(scope),
+	}
+	if !scope.DisableVnetReconcile {
+		services = append(services, virtualnetworks.New(scope))
+	}
+	if !scope.DisableSubnetReconcile {
+		services = append(services, subnets.New(scope))
+	}
+	services = append(services, managedclusters.New(scope), tags.New(scope))
 	return &azureManagedControlPlaneService{
 		kubeclient: scope.Client,
 		scope:      scope,
-		services: []azure.ServiceReconciler{
-			groups.New(scope),
-			virtualnetworks.New(scope),
-			subnets.New(scope),
-			managedclusters.New(scope),
-			tags.New(scope),
-		},
+		services:   services,
 	}
 }
 
@@ -92,8 +97,11 @@ func (r *azureManagedControlPlaneService) reconcileKubeconfig(ctx context.Contex
 	ctx, _, done := tele.StartSpanWithLogger(ctx, "controllers.azureManagedControlPlaneService.reconcileKubeconfig")
 	defer done()
 
+	klog.V(2).Infof("Reconciling kubeconfig")
+
 	kubeConfigData := r.scope.GetKubeConfigData()
 	if kubeConfigData == nil {
+		klog.V(2).Infof("Empty kubeconfig data")
 		return nil
 	}
 	kubeConfigSecret := r.scope.MakeEmptyKubeConfigSecret()
